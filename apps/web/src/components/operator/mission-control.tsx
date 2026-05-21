@@ -29,7 +29,7 @@ export function MissionControl({ snapshot, onLogIntervention, onRegenerateReport
 
         <Workspace files={snapshot.files} onOpenDiff={setDiffFile} />
         <InterventionForm onSubmit={onLogIntervention} />
-        <Manifest manifest={snapshot.manifest} />
+        <Manifest manifest={snapshot.manifest} stats={snapshot.stats} />
 
         <FinalReport
           report={snapshot.report}

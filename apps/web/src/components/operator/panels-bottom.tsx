@@ -5,6 +5,7 @@ import type {
   InterventionInput,
   Logs,
   Manifest as ManifestData,
+  RunStats,
   TimelineEvent,
   WorkspaceFile,
 } from "@needle-agent/api/agent/types";
@@ -514,7 +515,11 @@ export function InterventionForm({ onSubmit }: { onSubmit: (entry: InterventionI
 
 // ---------- MANIFEST ----------
 
-export function Manifest({ manifest }: { manifest: ManifestData }) {
+function fmtK(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+export function Manifest({ manifest, stats }: { manifest: ManifestData; stats: RunStats }) {
   const flags: [string, boolean][] = [
     ["paid_inference", manifest.paid_usage.paid_inference],
     ["paid_apis", manifest.paid_usage.paid_apis],
@@ -546,16 +551,49 @@ export function Manifest({ manifest }: { manifest: ManifestData }) {
             className="val"
             style={{ fontSize: 10.5, textAlign: "right", whiteSpace: "normal", maxWidth: 220, lineHeight: 1.5 }}
           >
-            {manifest.additional_models.map((m) => (
-              <span key={m} style={{ display: "block" }}>
-                {m}
-              </span>
-            ))}
+            {manifest.additional_models.length === 0 ? (
+              <span className="dim">none</span>
+            ) : (
+              manifest.additional_models.map((m) => (
+                <span key={m} style={{ display: "block" }}>
+                  {m}
+                </span>
+              ))
+            )}
+          </span>
+        </div>
+        <div className="man-row" style={{ alignItems: "flex-start" }}>
+          <span className="lbl">hardware</span>
+          <span
+            className="val"
+            style={{ fontSize: 10.5, textAlign: "right", whiteSpace: "normal", maxWidth: 220, lineHeight: 1.5 }}
+          >
+            {manifest.hardware}
+          </span>
+        </div>
+
+        <div className="hd-rule" style={{ marginTop: 12, marginBottom: 6 }}>
+          <span className="tiny dim">run usage · state.json</span>
+          <span className="line" />
+        </div>
+
+        <div className="man-row">
+          <span className="lbl">model / tool calls</span>
+          <span className="val">
+            {stats.modelCalls} <span className="dim">/</span> {stats.toolCalls}
           </span>
         </div>
         <div className="man-row">
-          <span className="lbl">hardware</span>
-          <span className="val">{manifest.hardware}</span>
+          <span className="lbl">tokens in / out</span>
+          <span className="val">
+            {fmtK(stats.inputTokens)} <span className="dim">/</span> {fmtK(stats.outputTokens)}
+          </span>
+        </div>
+        <div className="man-row">
+          <span className="lbl">errors</span>
+          <span className="val" style={{ color: stats.errors > 0 ? "var(--bad)" : "var(--text)" }}>
+            {stats.errors}
+          </span>
         </div>
 
         <div className="hd-rule" style={{ marginTop: 12, marginBottom: 6 }}>

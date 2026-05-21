@@ -313,7 +313,7 @@
   .brand-name { font-weight: 600; font-size: 13px; letter-spacing: -0.01em; }
   .brand-sub { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); }
 
-  .topbar-mid { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .topbar-mid { display: flex; align-items: center; gap: 14px; min-width: 0; overflow: hidden; }
   .topbar-right { display: flex; align-items: center; gap: 14px; }
   .run-controls {
     display: flex;
@@ -1130,6 +1130,12 @@
   .quick-prompt-label { line-height: 1.3; }
 
   /* ---------- Responsive ---------- */
+  /* Below ~1440px the topbar gets tight once run controls expand to
+     Pause + Stop — drop the secondary ITER/ELAPSED readout so the phase
+     stepper and controls always fit without overlapping. */
+  @media (max-width: 1440px) {
+    .meta-group, .meta-sep { display: none; }
+  }
   @media (max-width: 1180px) {
     .bento { grid-template-columns: repeat(6, 1fr); }
     .col-4, .col-5, .col-7, .col-8 { grid-column: span 6; }

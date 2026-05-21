@@ -263,6 +263,15 @@ function buildTimeline(events: RunEvent[]): TimelineEvent[] {
           detail: null,
         });
         break;
+      case "operator_prompt":
+        rows.push({
+          ts,
+          type: "human",
+          summary: `Operator nudge: ${str(e, "text")}`,
+          meta: e.intervention === true ? "intervention" : "nudge",
+          detail: null,
+        });
+        break;
       // model_call / self_tests_seeded are intentionally not surfaced as rows —
       // their totals show in the run stats instead of flooding the feed.
     }
@@ -514,7 +523,13 @@ interface AgentProcess {
 }
 
 // Stash on globalThis so the reference survives `bun --hot` reloads.
-const procSlot = globalThis as typeof globalThis & { __needleAgentProc?: AgentProcess | null };
+const procSlot = globalThis as typeof globalThis & {
+  __needleAgentProc?: AgentProcess | null;
+  __needleStoppedAt?: number;
+};
+
+/** Window (ms) used both for run.jsonl liveness and post-Stop suppression. */
+const LIVE_WINDOW_MS = 240_000;
 
 function liveProc(): AgentProcess | null {
   const p = procSlot.__needleAgentProc;
@@ -545,6 +560,15 @@ function nextDeadline(): string {
 
 function buildRun(state: StateFile | null, runStart: RunEvent | undefined, lastTs: string | null): RunState {
   const proc = liveProc();
+  // A run counts as live when we still hold its process handle, or — as a
+  // restart-proof fallback — when run.jsonl is still being appended to and no
+  // terminal phase has been reached. The fallback is suppressed briefly after
+  // an explicit Stop so the UI reflects that immediately.
+  const lastEventAge = lastTs ? Date.now() - new Date(lastTs).getTime() : Number.POSITIVE_INFINITY;
+  const recentlyStopped =
+    procSlot.__needleStoppedAt != null && Date.now() - procSlot.__needleStoppedAt < LIVE_WINDOW_MS;
+  const eventsFresh =
+    state != null && !state.done && lastEventAge < LIVE_WINDOW_MS && !recentlyStopped;
   return {
     phase: state?.phase ?? null,
     iteration: state?.iteration ?? 0,
@@ -552,7 +576,7 @@ function buildRun(state: StateFile | null, runStart: RunEvent | undefined, lastT
     startedAt: runStart?.ts ?? null,
     completedAt: state?.done ? (state.updatedAt ?? lastTs) : null,
     model: runStart ? str(runStart, "model") : "",
-    running: proc !== null,
+    running: proc !== null || eventsFresh,
     paused: proc?.paused ?? false,
     stuck: (state?.noImprovementStreak ?? 0) >= 3,
   };
@@ -622,11 +646,22 @@ function stamp(): string {
   return `[${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`;
 }
 
-/** Append text to a real log file under .needle-agent/, creating it if needed. */
-async function appendLog(name: string, text: string): Promise<void> {
-  const path = join(OUT_DIR, name);
+/**
+ * Append a prompt to operator-prompts.jsonl — the queue the agent drains at
+ * the start of every iteration (see apps/agent/src/operator.ts). This is the
+ * real delivery path: when the agent drains the queue it logs the prompt to
+ * prompts.log, records the intervention, and emits the run event itself.
+ */
+async function enqueueOperatorPrompt(text: string, intervention: boolean): Promise<void> {
+  const path = join(OUT_DIR, "operator-prompts.jsonl");
   const existing = await readText(path);
-  await Bun.write(path, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${text}\n`);
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    text: text.trim(),
+    intervention,
+    refs: [] as string[],
+  });
+  await Bun.write(path, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${line}\n`);
 }
 
 export async function logIntervention(entry: InterventionInput): Promise<AgentSnapshot> {
@@ -655,10 +690,11 @@ interface OllamaChatResponse {
   message?: { content?: string };
 }
 
-/** Ask the real local model how it will handle an operator nudge. */
+/** Best-effort live preview: ask the local model how it would act on a nudge.
+ *  Only attempted when no run is active — during a run the model is saturated. */
 async function askAgent(prompt: string, context: string, model: string): Promise<PromptResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60_000);
+  const timer = setTimeout(() => controller.abort(), 45_000);
   try {
     const res = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
@@ -684,22 +720,25 @@ async function askAgent(prompt: string, context: string, model: string): Promise
     });
     if (!res.ok) {
       return {
-        reply: `Prompt logged to prompts.log. The model could not be reached (Ollama HTTP ${res.status}); the running agent will still pick this up from the log on its next iteration.`,
-        model: "unavailable",
+        reply: `Queued for the agent. The local model returned HTTP ${res.status}, so no live preview was generated — the prompt will still be applied at the next iteration.`,
+        model: "",
       };
     }
     const data = (await res.json()) as OllamaChatResponse;
     const reply = data.message?.content?.trim();
+    return reply
+      ? { reply, model }
+      : {
+          reply: "Queued for the agent — it will be applied as a nudge at the next iteration.",
+          model: "",
+        };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "AbortError";
     return {
-      reply:
-        reply ||
-        "Prompt logged to prompts.log. The agent will incorporate it at the next iteration boundary.",
-      model,
-    };
-  } catch {
-    return {
-      reply: `Prompt logged to prompts.log. Ollama is not reachable at ${OLLAMA_URL}, so no live reply was generated — the running agent will still read this nudge from the log on its next iteration.`,
-      model: "unavailable",
+      reply: aborted
+        ? "Queued for the agent. The live preview timed out — the local model did not respond in time — but the prompt is in the queue and will be applied at the next iteration."
+        : `Queued for the agent. The local model at ${OLLAMA_URL} could not be reached for a live preview; the prompt is still queued and will be applied at the next iteration.`,
+      model: "",
     };
   } finally {
     clearTimeout(timer);
@@ -707,39 +746,35 @@ async function askAgent(prompt: string, context: string, model: string): Promise
 }
 
 export async function sendPrompt(input: PromptInput): Promise<{ snapshot: AgentSnapshot; result: PromptResult }> {
-  const state = await readState();
-  const events = await readRunEvents();
-  const runStart = events.find((e) => e.type === "run_start");
-  const model = runStart ? str(runStart, "model") || AGENT_MODEL : AGENT_MODEL;
+  // Deliver the prompt by appending it to the operator-prompts queue. The agent
+  // drains this queue at the start of every iteration and logs / acts on it
+  // itself — so this one append is the whole delivery.
+  await enqueueOperatorPrompt(input.text, input.intervention);
 
-  const oneLine = input.text.replace(/\s+/g, " ").trim();
-  await appendLog("prompts.log", `${stamp()} PROMPT (phase=operator)\n${input.text}\n`);
+  const snapshot = await getSnapshot();
 
-  if (input.intervention) {
-    const truncated = oneLine.length > 140 ? `${oneLine.slice(0, 137)}...` : oneLine;
-    await logIntervention({
-      type: "nudge",
-      what: `Operator sent a live prompt to the agent: "${truncated}"`,
-      why: "Operator-initiated strategy nudge during the run.",
-      files: "",
-      touched: false,
-      notes: "Recorded automatically from the Prompt Agent console.",
-    });
+  // During a run the agent saturates the local model, so a live-preview reply
+  // would only time out. Return immediately — the prompt is already queued.
+  if (snapshot.run.running) {
+    return {
+      snapshot,
+      result: {
+        reply:
+          "Queued for the agent. It is in the operator-prompts queue and will be applied as a high-priority nudge at the next iteration boundary. No live preview was generated because the model is busy running the current iteration.",
+        model: "",
+      },
+    };
   }
 
-  const scores = buildScores(events);
-  const last = scores.at(-1);
+  // No run in progress — the local model is free, so generate a live reply.
+  const last = snapshot.scores.at(-1);
   const context = [
-    `phase=${state?.phase ?? "unknown"}`,
-    `iteration=${state?.iteration ?? 0}/${state?.maxIterations ?? 0}`,
+    `phase=${snapshot.run.phase ?? "idle"}`,
+    `iteration=${snapshot.run.iteration}/${snapshot.run.maxIterations}`,
     `score=${last ? `${last.score}/${last.total}` : "n/a"}`,
-    last && last.failingCategories.length
-      ? `failing=${last.failingCategories.map((c) => c.name).slice(0, 4).join(", ")}`
-      : "failing=none",
   ].join(" ");
-
-  const result = await askAgent(input.text, context, model);
-  return { snapshot: await getSnapshot(), result };
+  const result = await askAgent(input.text, context, snapshot.run.model || AGENT_MODEL);
+  return { snapshot, result };
 }
 
 function buildReport(snap: AgentSnapshot): string {
@@ -808,6 +843,7 @@ export async function regenerateReport(): Promise<AgentSnapshot> {
 
 function startAgent(): void {
   if (liveProc()) return; // already running
+  procSlot.__needleStoppedAt = undefined; // a new run clears any prior Stop
 
   // Start a clean run: drop the previous run's structured artifacts so the
   // console reflects only this run. Human interventions and the manifest are
@@ -862,6 +898,9 @@ export async function control(action: ControlAction): Promise<AgentSnapshot> {
         proc.proc.kill("SIGTERM");
         procSlot.__needleAgentProc = null;
       }
+      // Mark the stop even with no handle, so the run.jsonl-freshness
+      // fallback doesn't keep reporting the run as live.
+      procSlot.__needleStoppedAt = Date.now();
       break;
   }
   return getSnapshot();
