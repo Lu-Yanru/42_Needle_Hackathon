@@ -61,6 +61,32 @@ export class Workspace {
     });
   }
 
+  async editFile(
+    path: string,
+    search: string,
+    replace: string,
+    replaceAll = false,
+  ): Promise<Result<number, FileSystemError | WorkspacePathError>> {
+    const current = await this.readFile(path);
+    if (current.isErr()) return current;
+    const occurrences = current.value.split(search).length - 1;
+    if (occurrences < 1) {
+      return Result.err(
+        new FileSystemError({
+          operation: "edit",
+          path,
+          cause: new Error(`Target text not found in ${path}`),
+        }),
+      );
+    }
+    const next = replaceAll
+      ? current.value.split(search).join(replace)
+      : current.value.replace(search, replace);
+    const written = await this.writeFile(path, next);
+    if (written.isErr()) return written;
+    return Result.ok(replaceAll ? occurrences : 1);
+  }
+
   /** Every file in the workspace, as paths relative to the root, sorted. */
   async listFiles(): Promise<Result<string[], FileSystemError>> {
     const glob = new Bun.Glob("**/*");

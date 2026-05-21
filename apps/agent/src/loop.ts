@@ -14,6 +14,14 @@ import type { Logger } from "./logger";
 import { type ChatMessage, chat, type Usage } from "./ollama";
 import * as prompts from "./prompts";
 import {
+  compactFailureSignal,
+  deriveVerificationCommands,
+  isUniqueSelfTest,
+  normalizePlan,
+  renderWorkspacePreview,
+  shouldStopRepeatedRunCommand,
+} from "./harness-helpers";
+import {
   type Action,
   ActionSchema,
   PlanSchema,
@@ -22,7 +30,7 @@ import {
   SelfTestSchema,
   type TestResult,
 } from "./state";
-import { programBaseCommand, runSelfTests } from "./self-tests";
+import { deriveSpecSelfTests, programBaseCommand, runSelfTests } from "./self-tests";
 import { runPublicTests, smokeRun } from "./test-runner";
 import { createTools, FINISH_PHASE, type ToolContext } from "./tools/index";
 import type { AnyTool } from "./tools/types";
@@ -57,13 +65,22 @@ function safeJson(text: string): unknown {
   return null;
 }
 
-/** Map a parsed Action to a tool name + argument object for the tool registry. */
 function actionToToolArgs(action: Action): { name: string; args: Record<string, unknown> } {
   switch (action.tool) {
     case "read_file":
       return { name: "read_file", args: { path: action.path } };
     case "write_file":
       return { name: "write_file", args: { path: action.path, content: action.content } };
+    case "edit_file":
+      return {
+        name: "edit_file",
+        args: {
+          path: action.path,
+          search: action.search,
+          replace: action.replace,
+          replace_all: action.replace_all,
+        },
+      };
     case "list_dir":
       return { name: "list_dir", args: {} };
     case "run_command":
@@ -73,18 +90,46 @@ function actionToToolArgs(action: Action): { name: string; args: Record<string, 
   }
 }
 
-async function renderFiles(workspace: Workspace): Promise<string> {
+function nextVerificationCommand(state: RunState): string | null {
+  if (state.verificationCommands.length === 0) return null;
+  const index = state.nextVerificationIndex % state.verificationCommands.length;
+  const command = state.verificationCommands[index] ?? null;
+  state.nextVerificationIndex = (index + 1) % state.verificationCommands.length;
+  return command;
+}
+
+async function runVerificationAnchor(
+  state: RunState,
+  tools: AnyTool[],
+  events: EventLog,
+  command: string,
+): Promise<{ content: string; shouldStop: boolean }> {
+  const tool = tools.find((candidate) => candidate.name === "run_command");
+  if (!tool) return { content: "Automatic verification unavailable: run_command tool missing", shouldStop: false };
+
+  const result = await tool.run({ command, timeout_seconds: 15 });
+  await events.toolCall("auto_verify", !result.isError, result.content.slice(0, 140));
+
+  const repetition = shouldStopRepeatedRunCommand(state.lastRunState, command, result.content);
+  state.lastRunState = repetition.nextState;
+  return {
+    content: `Automatic verification (${command}):\n${result.content}`,
+    shouldStop: repetition.shouldStop,
+  };
+}
+
+async function renderFiles(workspace: Workspace, entrypoint: string | null): Promise<string> {
   const listed = await workspace.listFiles();
-  const files = listed.unwrapOr([]);
+  const files: string[] = listed.unwrapOr([]);
   if (files.length === 0) return "(workspace is empty)";
-  const parts: string[] = [];
-  for (const file of files.slice(0, 12)) {
-    const content = (await workspace.readFile(file)).unwrapOr("");
+
+  const contents = new Map<string, string>();
+  if (entrypoint && files.includes(entrypoint)) {
+    const content = (await workspace.readFile(entrypoint)).unwrapOr("");
     const t = truncateHead(content, { maxLines: 140, maxBytes: 6000 });
-    parts.push(`### ${file}\n\`\`\`\n${t.content}\n\`\`\``);
+    contents.set(entrypoint, t.content);
   }
-  if (files.length > 12) parts.push(`... and ${files.length - 12} more file(s)`);
-  return parts.join("\n\n");
+  return renderWorkspacePreview(files, contents, entrypoint);
 }
 
 async function doPlanning(state: RunState, logger: Logger, events: EventLog): Promise<void> {
@@ -129,16 +174,16 @@ async function doPlanning(state: RunState, logger: Logger, events: EventLog): Pr
   await events.modelCall("PLANNING", chatResult.durationMs, chatResult.usage, 0);
   const parsed = PlanSchema.safeParse(safeJson(chatResult.message.content));
   if (parsed.success) {
-    state.plan = parsed.data;
+    state.plan = normalizePlan(parsed.data);
     await logger.decision(
       "plan accepted",
-      `run_command="${parsed.data.run_command}", ${parsed.data.steps.length} step(s)`,
+      `run_command="${state.plan.run_command}", ${state.plan.steps.length} step(s)`,
       "GENERATE_TESTS",
     );
     await events.emit("plan", {
-      runCommand: parsed.data.run_command,
-      entrypoint: parsed.data.entrypoint,
-      steps: parsed.data.steps.length,
+      runCommand: state.plan.run_command,
+      entrypoint: state.plan.entrypoint,
+      steps: state.plan.steps.length,
     });
     state.phase = "GENERATE_TESTS";
     return;
@@ -173,13 +218,21 @@ async function doGenerateTests(
   // Generate one flat test per call. Ollama's constrained decoding is far
   // slower on nested schemas, so a per-test loop stays fast and reliable
   // where a single whole-suite call times out.
-  const target = 6;
+  const target = 4;
   const testFormat = z.toJSONSchema(SelfTestSchema);
-  const tests: SelfTest[] = [];
+  const tests: SelfTest[] = deriveSpecSelfTests(state.spec, state.plan);
 
-  for (let i = 0; i < target; i++) {
+  if (tests.length > 0) {
+    await logger.decision(
+      "seeded self-tests from spec examples",
+      `${tests.length} deterministic case(s): ${tests.map((t) => t.name).join(", ")}`,
+    );
+    await events.emit("self_tests_seeded", { count: tests.length });
+  }
+
+  for (let i = tests.length; i < target; i++) {
     const prompt = prompts.generateTestPrompt(state.spec, state.plan, tests);
-    if (i === 0) await logger.prompt("GENERATE_TESTS", prompt);
+    if (i === tests.length) await logger.prompt("GENERATE_TESTS", prompt);
 
     const res = await chat({
       messages: [
@@ -208,8 +261,16 @@ async function doGenerateTests(
     const chatResult = res.value;
     await events.modelCall("GENERATE_TESTS", chatResult.durationMs, chatResult.usage, 0);
     const parsed = SelfTestSchema.safeParse(safeJson(chatResult.message.content));
-    if (parsed.success) {
+    if (parsed.success && isUniqueSelfTest(tests, parsed.data)) {
       tests.push(parsed.data);
+    } else if (parsed.success) {
+      await logger.error(
+        "SELFTEST_DUPLICATE",
+        `${parsed.data.rule} :: ${parsed.data.args}`,
+        `self-test ${i + 1}/${target}`,
+        "skipping duplicate case",
+      );
+      await events.errorEvent("SELFTEST_DUPLICATE", parsed.data.rule.slice(0, 150));
     } else {
       await logger.error(
         "SELFTEST_PARSE",
@@ -222,6 +283,8 @@ async function doGenerateTests(
   }
 
   state.selfTests = tests;
+  state.verificationCommands = deriveVerificationCommands(programBaseCommand(state.plan.run_command), tests);
+  state.nextVerificationIndex = 0;
   if (tests.length > 0) {
     await logger.decision(
       "self-tests generated",
@@ -255,32 +318,34 @@ async function doModelPhase(
   }
   await events.emit("phase_start", { phase: state.phase, iteration: state.iteration });
 
-  const files = await renderFiles(workspace);
+  const files = await renderFiles(workspace, state.plan.entrypoint);
   let userPrompt: string;
   if (state.phase === "IMPLEMENTING") {
-    userPrompt = prompts.implementingPrompt(state.plan, files);
+    userPrompt = prompts.implementingPrompt(state.plan, files, state.verificationCommands);
   } else {
     const tr = state.lastTestResult;
     if (!tr) {
       state.phase = "TESTING";
       return;
     }
+    const failureSignal = compactFailureSignal(tr);
     userPrompt =
       state.noImprovementStreak >= NO_IMPROVEMENT_LIMIT
-        ? prompts.stuckPrompt(state.plan, tr, files)
-        : prompts.fixingPrompt(state.plan, tr, files);
+        ? prompts.stuckPrompt(state.plan, failureSignal, files, state.verificationCommands)
+        : prompts.fixingPrompt(state.plan, failureSignal, files, state.verificationCommands);
   }
   await logger.prompt(state.phase, userPrompt);
 
   const actionFormat = z.toJSONSchema(ActionSchema);
-  const messages: ChatMessage[] = [
+  const baseMessages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
   ];
+  let followupMessages: ChatMessage[] = [];
 
   let finished = false;
   for (let step = 0; step < MAX_INNER_STEPS && !finished; step++) {
-    const res = await chat({ messages, format: actionFormat });
+    const res = await chat({ messages: [...baseMessages, ...followupMessages], format: actionFormat });
     if (res.isErr()) {
       await logger.error(
         "LLM_ERROR",
@@ -303,22 +368,27 @@ async function doModelPhase(
         "asking model to retry",
       );
       await events.errorEvent("ACTION_PARSE", parsed.error.message.slice(0, 150));
-      messages.push({ role: "assistant", content: chatResult.message.content });
-      messages.push({
-        role: "user",
-        content: "Your response was not a valid action JSON object. Respond with exactly one action object.",
-      });
+      followupMessages = [
+        { role: "assistant", content: chatResult.message.content },
+        {
+          role: "user",
+          content: "Your response was not a valid action JSON object. Respond with exactly one action object.",
+        },
+      ];
       continue;
     }
 
     const action = parsed.data;
-    messages.push({ role: "assistant", content: chatResult.message.content });
+    followupMessages = [{ role: "assistant", content: chatResult.message.content }];
     await logger.decision(`${state.phase} action: ${action.tool}`, action.reasoning);
 
     const { name, args } = actionToToolArgs(action);
     const tool = tools.find((t) => t.name === name);
     if (!tool) {
-      messages.push({ role: "user", content: `Unknown tool: ${name}` });
+      followupMessages.push({
+        role: "user",
+        content: `Unknown tool: ${name}`,
+      });
       continue;
     }
     const result = await tool.run(args);
@@ -329,7 +399,43 @@ async function doModelPhase(
       finished = true;
       break;
     }
-    messages.push({ role: "user", content: `Result of ${name}:\n${result.content}` });
+    if ((name === "write_file" || name === "edit_file") && !result.isError) {
+      const command = nextVerificationCommand(state);
+      if (command) {
+        const autoVerify = await runVerificationAnchor(state, tools, events, command);
+        if (autoVerify.shouldStop) {
+          await logger.decision(
+            "stop repeated verification",
+            "the same deterministic verification command produced the same failure twice; ending the phase to avoid thrashing",
+            "TESTING",
+          );
+          followupMessages.push({
+            role: "user",
+            content: `Result of ${name}:\n${result.content}\n\n${autoVerify.content}`,
+          });
+          break;
+        }
+        followupMessages.push({
+          role: "user",
+          content: `Result of ${name}:\n${result.content}\n\n${autoVerify.content}`,
+        });
+        continue;
+      }
+    }
+    if (name === "run_command") {
+      const command = typeof args.command === "string" ? args.command : "";
+      const repetition = shouldStopRepeatedRunCommand(state.lastRunState, command, result.content);
+      state.lastRunState = repetition.nextState;
+      if (repetition.shouldStop) {
+        await logger.decision(
+          "stop repeated run_command",
+          "the same command produced the same failure twice; ending the phase to avoid thrashing",
+          "TESTING",
+        );
+        break;
+      }
+    }
+    followupMessages.push({ role: "user", content: `Result of ${name}:\n${result.content}` });
   }
 
   state.phase = "TESTING";
@@ -412,6 +518,7 @@ async function doTesting(
 
   if (fullPass) {
     state.bestScore = result.score;
+    state.lastRunState = null;
     await logger.decision("all tests passing", `${result.score}/${result.total}`, "DONE");
     await events.emit("done", { score: result.score, total: result.total });
     state.phase = "DONE";
@@ -422,6 +529,7 @@ async function doTesting(
     state.bestScore = result.score;
     state.noImprovementStreak = 0;
     state.lastGoodSnapshot = (await workspace.snapshot()).unwrapOr(null);
+    state.lastRunState = null;
     await logger.decision("score improved", `new best ${result.score}/${result.total}`, "FIXING");
     await events.emit("score_improved", {
       score: result.score,

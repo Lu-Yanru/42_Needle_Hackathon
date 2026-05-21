@@ -81,7 +81,7 @@ export function createTools(ctx: ToolContext): AnyTool[] {
     }),
     defineTool({
       name: "write_file",
-      description: "Create or overwrite a file in the workspace with the given content.",
+      description: "Create or overwrite a file in the workspace with the given content. Best for initial file creation or major rewrites.",
       parameters: z.object({
         path: z.string().describe("Path relative to the workspace root"),
         content: z.string().describe("Full content of the file"),
@@ -90,6 +90,28 @@ export function createTools(ctx: ToolContext): AnyTool[] {
         const written = await workspace.writeFile(path, content);
         if (written.isErr()) return { content: written.error.message, isError: true };
         return { content: `Wrote ${content.length} characters to ${path}`, details: { path } };
+      },
+    }),
+    defineTool({
+      name: "edit_file",
+      description:
+        "Patch an existing file by replacing one exact snippet with another. Prefer this over write_file for small, targeted changes.",
+      parameters: z.object({
+        path: z.string().describe("Path relative to the workspace root"),
+        search: z.string().min(1).describe("Exact text to replace"),
+        replace: z.string().describe("Replacement text"),
+        replace_all: z
+          .boolean()
+          .optional()
+          .describe("Replace every occurrence instead of only the first match"),
+      }),
+      async execute({ path, search, replace, replace_all }) {
+        const edited = await workspace.editFile(path, search, replace, replace_all ?? false);
+        if (edited.isErr()) return { content: edited.error.message, isError: true };
+        return {
+          content: `Patched ${path} (${edited.value} replacement${edited.value === 1 ? "" : "s"})`,
+          details: { path, replacements: edited.value },
+        };
       },
     }),
     defineTool({

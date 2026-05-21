@@ -113,6 +113,9 @@ async function main(): Promise<number> {
     selfTests: [],
     testCommand: args.testCmd,
     testSource: "none",
+    verificationCommands: [],
+    nextVerificationIndex: 0,
+    lastRunState: null,
     dryRun: args.dryRun,
   };
 

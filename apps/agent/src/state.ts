@@ -21,22 +21,45 @@ export const PlanSchema = z.object({
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
+const ActionBaseSchema = z.object({
+  reasoning: z.string().describe("One sentence: why you are taking this action"),
+});
+
 /**
  * One action the model takes per turn in IMPLEMENTING / FIXING.
  * Sent to Ollama as a `format` JSON schema so the response is guaranteed
  * to be a valid action object — local models do not reliably emit native
  * tool calls.
  */
-export const ActionSchema = z.object({
-  reasoning: z.string().describe("One sentence: why you are taking this action"),
-  tool: z
-    .enum(["read_file", "write_file", "list_dir", "run_command", "finish_phase"])
-    .describe("The action to take"),
-  path: z.string().optional().describe("File path — for read_file and write_file"),
-  content: z.string().optional().describe("Full file content — for write_file"),
-  command: z.string().optional().describe("Shell command — for run_command"),
-  summary: z.string().optional().describe("What you accomplished — for finish_phase"),
-});
+export const ActionSchema = z.discriminatedUnion("tool", [
+  ActionBaseSchema.extend({
+    tool: z.literal("read_file").describe("Read an existing file"),
+    path: z.string().describe("File path to inspect"),
+  }),
+  ActionBaseSchema.extend({
+    tool: z.literal("write_file").describe("Create or fully rewrite a file"),
+    path: z.string().describe("File path to write"),
+    content: z.string().describe("Full file content"),
+  }),
+  ActionBaseSchema.extend({
+    tool: z.literal("edit_file").describe("Patch an existing file"),
+    path: z.string().describe("File path to patch"),
+    search: z.string().min(1).describe("Exact text to replace"),
+    replace: z.string().describe("Replacement text"),
+    replace_all: z.boolean().optional().describe("Replace every occurrence instead of only the first"),
+  }),
+  ActionBaseSchema.extend({
+    tool: z.literal("list_dir").describe("List files in the workspace"),
+  }),
+  ActionBaseSchema.extend({
+    tool: z.literal("run_command").describe("Run a shell command"),
+    command: z.string().describe("Concrete shell command"),
+  }),
+  ActionBaseSchema.extend({
+    tool: z.literal("finish_phase").describe("Tell the harness this phase is ready for testing"),
+    summary: z.string().describe("What you accomplished"),
+  }),
+]);
 export type Action = z.infer<typeof ActionSchema>;
 
 /**
@@ -57,6 +80,7 @@ export const SelfTestSchema = z.object({
   inputContent: z.string().describe("Exact content of the input file"),
   args: z.string().describe("Command-line arguments passed to the program"),
   expectedStdout: z.string().optional().describe("Exact stdout the program must print"),
+  expectedStderr: z.string().optional().describe("Exact stderr the program must print"),
   expectedExitCode: z.number().int().optional().describe("Exit code the program must return"),
 });
 export type SelfTest = z.infer<typeof SelfTestSchema>;
@@ -81,6 +105,12 @@ export interface ScorePoint {
   total: number;
 }
 
+export interface RepeatedRunState {
+  command: string;
+  fingerprint: string;
+  repeats: number;
+}
+
 export interface RunState {
   specPath: string;
   spec: string;
@@ -102,5 +132,11 @@ export interface RunState {
   testCommand: string;
   /** Which test source produced the last result. */
   testSource: "official" | "self" | "none";
+  /** Harness-owned verification anchor commands for cheap, deterministic checks. */
+  verificationCommands: string[];
+  /** Round-robin cursor into verificationCommands. */
+  nextVerificationIndex: number;
+  /** Repeated command/failure memory across phase boundaries. */
+  lastRunState: RepeatedRunState | null;
   dryRun: boolean;
 }

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Result } from "better-result";
 import { ProcessError } from "./errors";
-import type { SelfTest, TestResult } from "./state";
+import type { Plan, SelfTest, TestResult } from "./state";
 
 /**
  * Strip a trailing `<placeholder>` argument from a run command, leaving just
@@ -50,11 +50,13 @@ export function jsonEqual(a: string, b: string): boolean {
 
 export interface Expectation {
   expectedStdout?: string;
+  expectedStderr?: string;
   expectedExitCode?: number;
 }
 
 export interface ActualOutput {
   stdout: string;
+  stderr: string;
   exitCode: number;
 }
 
@@ -64,10 +66,11 @@ export function checkSelfTest(
   actual: ActualOutput,
 ): { passed: boolean; reason: string } {
   const hasStdout = expected.expectedStdout !== undefined;
+  const hasStderr = expected.expectedStderr !== undefined;
   const hasExit = expected.expectedExitCode !== undefined;
 
-  if (!hasStdout && !hasExit) {
-    return { passed: false, reason: "test asserts neither stdout nor an exit code" };
+  if (!hasStdout && !hasStderr && !hasExit) {
+    return { passed: false, reason: "test asserts neither stdout, stderr, nor an exit code" };
   }
   if (hasExit && actual.exitCode !== expected.expectedExitCode) {
     return {
@@ -80,7 +83,75 @@ export function checkSelfTest(
     const matches = jsonEqual(actual.stdout, exp) || actual.stdout.trim() === exp.trim();
     if (!matches) return { passed: false, reason: "stdout did not match the expected output" };
   }
+  if (hasStderr) {
+    const exp = expected.expectedStderr as string;
+    if (actual.stderr.trim() !== exp.trim()) {
+      return { passed: false, reason: "stderr did not match the expected output" };
+    }
+  }
   return { passed: true, reason: "ok" };
+}
+
+function cleanFenceBody(body: string): string[] {
+  return body
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/, ""));
+}
+
+function looksLikeErrorContext(specAfterBlock: string): boolean {
+  const nextFence = specAfterBlock.indexOf("```");
+  const nearby = (nextFence >= 0 ? specAfterBlock.slice(0, nextFence) : specAfterBlock.slice(0, 220)).toLowerCase();
+  return nearby.includes("stderr") || nearby.includes("exit code is `1`") || nearby.includes("exit code is 1");
+}
+
+export function deriveSpecSelfTests(spec: string, plan: Plan): SelfTest[] {
+  const tests: SelfTest[] = [];
+  const baseCommand = programBaseCommand(plan.run_command);
+  const fencePattern = /```(?:[^\n]*)\n([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  let exampleIndex = 0;
+
+  while ((match = fencePattern.exec(spec)) !== null) {
+    const body = match[1] ?? "";
+    const lines = cleanFenceBody(body);
+    const commandLine = lines[0]?.trim();
+    if (!commandLine?.startsWith("$ ")) continue;
+
+    const invoked = commandLine.slice(2).trim();
+    if (!(invoked === baseCommand || invoked.startsWith(`${baseCommand} `))) continue;
+
+    const args = invoked.slice(baseCommand.length).trim();
+    const outputLines = lines.slice(1);
+    const outputText = outputLines.join("\n").trim();
+    const afterBlock = spec.slice(match.index + match[0].length);
+    const isError = looksLikeErrorContext(afterBlock);
+    exampleIndex++;
+
+    const candidate: SelfTest = {
+      name: `spec example ${exampleIndex}`,
+      rule: isError
+        ? `Matches the exact documented error example for: ${args || "(default options)"}`
+        : `Matches the exact documented example output for: ${args || "(default options)"}`,
+      inputName: "",
+      inputContent: "",
+      args,
+      expectedExitCode: isError ? 1 : 0,
+      ...(isError
+        ? outputText
+          ? { expectedStderr: outputText }
+          : {}
+        : outputText
+          ? { expectedStdout: outputText }
+          : {}),
+    };
+
+    if (!tests.some((test) => JSON.stringify(test) === JSON.stringify(candidate))) {
+      tests.push(candidate);
+    }
+  }
+
+  return tests;
 }
 
 async function runOnce(
@@ -165,7 +236,9 @@ export async function runSelfTests(opts: RunSelfTestsOptions): Promise<TestResul
             `  rule: ${tc.rule}\n` +
             `  command: ${command}\n` +
             `  expected stdout: ${JSON.stringify(tc.expectedStdout ?? "(any)")}\n` +
+            `  expected stderr: ${JSON.stringify(tc.expectedStderr ?? "(any)")}\n` +
             `  actual stdout:   ${JSON.stringify(actual.stdout.slice(0, 600))}\n` +
+            `  actual stderr:   ${JSON.stringify(actual.stderr.slice(0, 600))}\n` +
             `  exit code: ${actual.exitCode} (expected ${tc.expectedExitCode ?? "(any)"})` +
             (actual.stderr.trim() ? `\n  stderr: ${actual.stderr.slice(0, 600)}` : ""),
         );
