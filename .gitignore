@@ -212,6 +212,12 @@ tempCodeRunnerFile.py
 # Agent logs — keep .gitkeep placeholder, ignore runtime files
 agent_logs/*.log
 agent_logs/final_report.md
+agent_logs/run.jsonl
+agent_logs/state.json
+
+# Agent run workspace (ephemeral test output)
+apps/agent/solution/
+/solution/
 
 # Marimo
 marimo/_static/

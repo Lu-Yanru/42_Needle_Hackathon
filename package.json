@@ -7,6 +7,7 @@
       "packages/*"
     ],
     "catalog": {
+      "better-result": "^2.9.2",
       "zod": "^4.1.13",
       "typescript": "^6",
       "@types/bun": "^1.3.4",
@@ -28,6 +29,7 @@
     "test": "turbo run test",
     "dev:web": "turbo run dev --filter=web",
     "dev:server": "turbo run dev --filter=server",
+    "tui": "bun run --filter=tui start",
     "db:push": "turbo run db:push --filter=@needle-agent/db",
     "db:studio": "turbo run db:studio --filter=@needle-agent/db",
     "db:generate": "turbo run db:generate --filter=@needle-agent/db",
