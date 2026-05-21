@@ -1,5 +1,5 @@
 """
-test_logger.py — Tests for agent/logger.py
+test_logger.py — Tests for src/agent/logger.py
 
 Run from the repo root:
     uv run python tests/test_logger.py
@@ -13,8 +13,10 @@ import sys
 import shutil
 import tempfile
 
-# Resolve repo root (parent of tests/) and add to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Resolve src/ (sibling of tests/) and add to path so `import agent` works
+# without an editable install. If you ran `uv sync`, this is a no-op.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 from agent.logger import AgentLogger
 

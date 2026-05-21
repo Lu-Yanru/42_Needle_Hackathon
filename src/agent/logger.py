@@ -26,6 +26,7 @@ from datetime import datetime
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _ts() -> str:
     """Return current timestamp in [YYYY-MM-DD HH:MM] format."""
     return datetime.now().strftime("[%Y-%m-%d %H:%M]")
@@ -41,16 +42,17 @@ def _append(path: str, text: str) -> None:
 # AgentLogger
 # ---------------------------------------------------------------------------
 
+
 class AgentLogger:
     """Writes structured, timestamped entries to all required log files."""
 
     # Map of attribute name → filename
     _LOG_FILES = {
-        "prompts":       "prompts.log",
-        "decisions":     "decisions.log",
-        "commands":      "commands.log",
-        "test_runs":     "test_runs.log",
-        "errors":        "errors.log",
+        "prompts": "prompts.log",
+        "decisions": "decisions.log",
+        "commands": "commands.log",
+        "test_runs": "test_runs.log",
+        "errors": "errors.log",
         "interventions": "human_interventions.log",
     }
 
@@ -82,18 +84,20 @@ class AgentLogger:
 
         if not os.path.exists(self._report_path):
             with open(self._report_path, "w", encoding="utf-8") as fh:
-                fh.write("# Final Report\n\n*Not yet written. Run generate_submission.py or call write_final_report().*\n")
+                fh.write(
+                    "# Final Report\n\n*Not yet written. Run generate_submission.py or call write_final_report().*\n"
+                )
 
     @staticmethod
     def _file_header(filename: str) -> str:
         """Return a one-line comment header for a log file."""
         headers = {
-            "prompts.log":              "# prompts.log — Human prompts sent to the agent\n\n",
-            "decisions.log":            "# decisions.log — Important agent decisions\n\n",
-            "commands.log":             "# commands.log — Commands run by agent or humans\n\n",
-            "test_runs.log":            "# test_runs.log — Public/self-test runs and score progression\n\n",
-            "errors.log":               "# errors.log — Crashes, tool failures, and stuck loops\n\n",
-            "human_interventions.log":  (
+            "prompts.log": "# prompts.log — Human prompts sent to the agent\n\n",
+            "decisions.log": "# decisions.log — Important agent decisions\n\n",
+            "commands.log": "# commands.log — Commands run by agent or humans\n\n",
+            "test_runs.log": "# test_runs.log — Public/self-test runs and score progression\n\n",
+            "errors.log": "# errors.log — Crashes, tool failures, and stuck loops\n\n",
+            "human_interventions.log": (
                 "# human_interventions.log — Manual actions after hidden task release\n"
                 "# Fill this in by hand. Format:\n"
                 "#\n"
@@ -258,6 +262,7 @@ class AgentLogger:
             improvements,        # list of strings
             notes
         """
+
         def get(key: str, default: str = "N/A") -> str:
             val = summary.get(key, default)
             return str(val) if val else default

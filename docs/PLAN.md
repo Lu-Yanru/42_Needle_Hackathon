@@ -29,12 +29,12 @@ ______________________________________________________________________
 
 ## Phase 1: Core Agent Loop (60 min)
 
-**Goal**: A single Python script `agent/run_agent.py` that can call the model, read files, write files, and run shell commands.
+**Goal**: A single Python script `src/agent/run_agent.py` that can call the model, read files, write files, and run shell commands.
 
 ### Files to create
 
 ```
-agent/
+src/agent/
   run_agent.py       # main loop
   tools.py           # file read/write/run_command helpers
   llm.py             # Ollama API wrapper
@@ -93,7 +93,7 @@ Agent is prompted to respond ONLY with:
 
 ### Test
 
-- Run `python3 agent/run_agent.py --dry-run` → prints one model call and one action without side effects
+- Run `uv run python -m agent.run_agent --dry-run` → prints one model call and one action without side effects
 - Manually verify file write and command run work
 
 ______________________________________________________________________
@@ -337,7 +337,7 @@ ______________________________________________________________________
 ## Phase 10: Real Run (20:00 onward)
 
 1. Copy `secret_spec/SECRET_SPEC.md` into agent workspace
-1. Run: `python3 agent/run_agent.py --spec secret_spec/SECRET_SPEC.md --workspace ./solution`
+1. Run: `uv run python -m agent.run_agent --spec secret_spec/SECRET_SPEC.md --workspace ./solution`
 1. Monitor logs in separate terminal: `tail -f agent_logs/test_runs.log`
 1. Let it run. Intervene only if:
    - Agent crashes → restart, log intervention
@@ -350,14 +350,16 @@ ______________________________________________________________________
 ## File Structure (final)
 
 ```
-hackathon-agent/
-  agent/
+42_Needle_Hackathon/
+  src/agent/
     run_agent.py
     llm.py
     tools.py
     prompts.py
     logger.py
+    test_runner.py
     generate_submission.py
+  tests/
   agent_logs/
     prompts.log
     decisions.log
@@ -369,8 +371,9 @@ hackathon-agent/
   solution/              # workspace for the hidden task
   toy_spec/              # for pre-reveal testing
   agent_manifest.json
+  pyproject.toml
+  uv.lock
   README.md
-  requirements.txt
 ```
 
 ______________________________________________________________________
@@ -408,7 +411,7 @@ ______________________________________________________________________
 
 ## Definition of Done (19:45 checkpoint)
 
-- [ ] `python3 agent/run_agent.py --spec <path>` starts without errors
+- [ ] `uv run python -m agent.run_agent --spec <path>` starts without errors
 - [ ] Agent calls Ollama, gets a response
 - [ ] Agent writes at least one file
 - [ ] Agent runs at least one command

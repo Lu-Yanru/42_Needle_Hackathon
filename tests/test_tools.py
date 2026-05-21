@@ -1,5 +1,5 @@
 """
-test_tools.py — Self-contained tests for agent/tools.py
+test_tools.py — Self-contained tests for src/agent/tools.py
 
 Run from the repo root:
     python3 test_tools.py
@@ -13,8 +13,11 @@ import sys
 import shutil
 import tempfile
 
-# Allow running from anywhere: add the repo root (parent of tests/) to sys.path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Allow running from anywhere: add src/ (sibling of tests/) to sys.path so
+# `import agent` works without an editable install. If you ran `uv sync`,
+# this is a no-op.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 from agent.tools import (
     read_file,

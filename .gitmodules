@@ -1,0 +1,3 @@
+[submodule "docs/official_docs"]
+	path = docs/official_docs
+	url = https://github.com/anavoronkova/42xNeedle_Hackathon/

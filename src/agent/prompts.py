@@ -56,10 +56,11 @@ Respond with a single JSON object, no prose:
 
 Or if implementation is complete and you want to run tests:
 {{
-  "action": "run_command",
-  "command": "python3 solution.py ...",
+  "action": "run_tests",
   "reasoning": "ready to test"
 }}
+
+The loop runs the test command from the plan automatically — do NOT include a "command" field for run_tests.
 """
 
 FIXING_PROMPT = """You are a coding agent fixing failing tests.

@@ -10,9 +10,9 @@ ______________________________________________________________________
 
 | Member | Role | Owns (files / phases) |
 | ------ | --------------- | ------------------------------------------------------------------------- |
-| **A** | Plumbing / LLM | `agent/llm.py`, Ollama setup, test-runner integration (Phase 0, 1a, 4b) |
-| **B** | Brain / Loop | `agent/run_agent.py`, `agent/prompts.py`, state machine (Phase 1b, 3, 5a) |
-| **C** | Tools / Logging | `agent/tools.py`, `agent/logger.py`, snapshots, manifest (Phase 1c, 2, 7) |
+| **A** | Plumbing / LLM | `src/agent/llm.py`, Ollama setup, test-runner integration (Phase 0, 1a, 4b) |
+| **B** | Brain / Loop | `src/agent/run_agent.py`, `src/agent/prompts.py`, state machine (Phase 1b, 3, 5a) |
+| **C** | Tools / Logging | `src/agent/tools.py`, `src/agent/logger.py`, snapshots, manifest (Phase 1c, 2, 7) |
 | **D** | QA / Integration (arrives 13:00) | toy spec + toy tests, dry-run harness, self-test gen, README (Phase 6, 8) |
 
 If anyone is sick / late, **C absorbs B's prompts work**, **A absorbs C's test-runner**. Do not block on the missing person.
@@ -52,7 +52,7 @@ ______________________________________________________________________
 
 - [ ] Install Ollama, pull `qwen2.5-coder:7b` (and `deepseek-coder:6.7b` as fallback)
 - [ ] Verify `curl http://localhost:11434/api/generate -d '{"model":"qwen2.5-coder:7b","prompt":"hi","stream":false}'` returns
-- [ ] Create skeleton `agent/llm.py` with `call_model(prompt, system="") -> str`
+- [ ] Create skeleton `src/agent/llm.py` with `call_model(prompt, system="") -> str`
 - [ ] Write a `requirements.txt` with `requests` only
 
 ### 13:00 - 15:00
@@ -63,7 +63,7 @@ ______________________________________________________________________
 
 ### 15:00 - 17:00 (Phase 4b — test runner glue)
 
-- [ ] Write `agent/test_runner.py`:
+- [ ] Write `src/agent/test_runner.py`:
   - `run_public_tests(workspace, program_cmd) -> dict` with `{score, total, failing_categories, raw}`
   - Robust to missing `secret_spec/test_runner/` — return a clear error dict
 - [ ] Decide on a parseable output convention with D's toy tests
@@ -77,13 +77,13 @@ ______________________________________________________________________
 
 ## Member B — Brain / Loop
 
-**Goal by 19:45**: `python3 agent/run_agent.py --spec toy_spec/SPEC.md` runs the full loop on the toy task.
+**Goal by 19:45**: `uv run python -m agent.run_agent --spec toy_spec/SPEC.md` runs the full loop on the toy task.
 
 ### 12:00 - 13:00 (solo)
 
 - [ ] Install Ollama + venv (same as A)
-- [ ] Stub `agent/run_agent.py` with the loop skeleton from `PLAN.md` Phase 1
-- [ ] Stub `agent/prompts.py` with three string templates: `PLANNING`, `IMPLEMENTING`, `FIXING`
+- [ ] Stub `src/agent/run_agent.py` with the loop skeleton from `PLAN.md` Phase 1
+- [ ] Stub `src/agent/prompts.py` with three string templates: `PLANNING`, `IMPLEMENTING`, `FIXING`
 
 ### 13:00 - 15:00 (Phase 1b)
 
@@ -113,8 +113,8 @@ ______________________________________________________________________
 ### 12:00 - 13:00 (solo)
 
 - [x] Install Ollama + venv
-- [x] Stub `agent/tools.py` with the four functions from `PLAN.md` Phase 1
-- [x] Stub `agent/logger.py` — empty `AgentLogger` class with method signatures
+- [x] Stub `src/agent/tools.py` with the four functions from `PLAN.md` Phase 1
+- [x] Stub `src/agent/logger.py` — empty `AgentLogger` class with method signatures
 
 ### 13:00 - 15:00 (Phase 1c + Phase 2)
 
@@ -132,7 +132,7 @@ ______________________________________________________________________
 
 ### 17:00 - 19:00 (Phase 7)
 
-- [ ] `agent/generate_submission.py`:
+- [ ] `src/agent/generate_submission.py`:
   - Writes `agent_manifest.json` (model name, provider=Ollama, paid=false, agent setup version, git SHA)
   - Writes `agent_logs/final_report.md` from a template + state dict
 - [ ] Sanity-check: `python3 -c "import json; json.load(open('agent_manifest.json'))"` passes
@@ -196,7 +196,7 @@ ______________________________________________________________________
 
 ## What "ready at 19:45" looks like (lifted from `PLAN.md` DoD)
 
-- [ ] `python3 agent/run_agent.py --spec <path>` starts without errors
+- [ ] `uv run python -m agent.run_agent --spec <path>` starts without errors
 - [ ] Agent calls Ollama, gets a response
 - [ ] Agent writes at least one file
 - [ ] Agent runs at least one command

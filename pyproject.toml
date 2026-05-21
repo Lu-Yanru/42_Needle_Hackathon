@@ -1,9 +1,19 @@
 [project]
 name = "42-needle-hackathon"
 version = "0.1.0"
-description = "Add your description here"
+description = "Hackathon agent that reads a spec, writes code, runs tests, and iterates."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "requests>=2.34.2",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

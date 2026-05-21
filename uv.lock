@@ -5,7 +5,7 @@ requires-python = ">=3.13"
 [[package]]
 name = "42-needle-hackathon"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "requests" },
 ]
