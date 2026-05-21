@@ -7,16 +7,26 @@ export function systemPrompt(tools: AnyTool[]): string {
   const toolList = tools.map((t) => `- ${t.name}: ${t.description}`).join("\n");
   return `You are an autonomous coding agent. You implement a program from a written specification, run it, and fix it until the tests pass.
 
-You make progress by calling tools. Available tools:
+Each turn you respond with exactly ONE action as a JSON object. The fields each action needs:
+
+- read_file    — { "tool": "read_file", "path": "<file>" }
+- write_file   — { "tool": "write_file", "path": "<file>", "content": "<full file content>" }
+- list_dir     — { "tool": "list_dir" }
+- run_command  — { "tool": "run_command", "command": "<shell command>" }
+- finish_phase — { "tool": "finish_phase", "summary": "<what you did>" }
+
+Every action object also needs a "reasoning" field (one sentence).
+
+What the tools do:
 ${toolList}
 
 Rules:
 - The specification is the source of truth. Implement exactly what it asks — no extra features.
 - Make small, targeted changes. Never rewrite a whole file to fix one bug.
 - Never print debug output to stdout in the final program; it breaks the test harness.
-- Inspect before you edit: use read_file / list_dir to understand the current state.
-- When the code for the current phase is ready, call ${"finish_phase"}.
-- Work autonomously. Do not ask the user questions.`;
+- Inspect before you edit: use read_file or list_dir to understand the current state.
+- When the code for the current phase is ready, use the finish_phase action.
+- Respond with ONLY the JSON action object — no prose, no markdown.`;
 }
 
 export function planningPrompt(spec: string): string {
@@ -51,7 +61,7 @@ ${JSON.stringify(plan, null, 2)}
 TEST RESULT: ${result.score}/${result.total} passing
 FAILING CATEGORIES: ${result.failing_categories.join(", ") || "(not categorised)"}
 
-TEST OUTPUT (tail):
+TEST OUTPUT + PROGRAM DIAGNOSTICS (the SMOKE RUN section shows the program's real error):
 ${result.raw.slice(-2500) || "(no output)"}
 
 CURRENT WORKSPACE FILES:
@@ -69,7 +79,7 @@ ${JSON.stringify(plan, null, 2)}
 TEST RESULT: ${result.score}/${result.total} passing
 FAILING CATEGORIES: ${result.failing_categories.join(", ") || "(not categorised)"}
 
-TEST OUTPUT (tail):
+TEST OUTPUT + PROGRAM DIAGNOSTICS (the SMOKE RUN section shows the program's real error):
 ${result.raw.slice(-2500) || "(no output)"}
 
 CURRENT WORKSPACE FILES:

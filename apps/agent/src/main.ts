@@ -70,8 +70,10 @@ async function main(): Promise<number> {
   }
   console.log(ollama.detail);
 
-  // The workspace directory is created lazily by the first Bun.write.
+  // Create the workspace up front so test-runner / run_command spawns have a
+  // valid cwd even before the model writes its first file.
   const workspaceDir = resolve(args.workspace);
+  await Bun.$`mkdir -p ${workspaceDir}`.quiet().nothrow();
 
   const state: RunState = {
     specPath: args.spec,

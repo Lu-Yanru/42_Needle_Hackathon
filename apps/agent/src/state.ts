@@ -14,6 +14,24 @@ export const PlanSchema = z.object({
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
+/**
+ * One action the model takes per turn in IMPLEMENTING / FIXING.
+ * Sent to Ollama as a `format` JSON schema so the response is guaranteed
+ * to be a valid action object — local models do not reliably emit native
+ * tool calls.
+ */
+export const ActionSchema = z.object({
+  reasoning: z.string().describe("One sentence: why you are taking this action"),
+  tool: z
+    .enum(["read_file", "write_file", "list_dir", "run_command", "finish_phase"])
+    .describe("The action to take"),
+  path: z.string().optional().describe("File path — for read_file and write_file"),
+  content: z.string().optional().describe("Full file content — for write_file"),
+  command: z.string().optional().describe("Shell command — for run_command"),
+  summary: z.string().optional().describe("What you accomplished — for finish_phase"),
+});
+export type Action = z.infer<typeof ActionSchema>;
+
 export interface TestResult {
   score: number;
   total: number;

@@ -2,26 +2,23 @@
 // state machine. PLANNING and IMPLEMENTING/FIXING are model-driven; TESTING is
 // deterministic (the harness runs tests, no model call) so the small local
 // model cannot drift or react to stale results.
+//
+// Model phases use Ollama's `format` (JSON-schema constrained output) to get
+// one validated action per turn — qwen2.5-coder does not reliably emit native
+// tool calls, so we never rely on `message.tool_calls`.
 
 import { z } from "zod";
 import { MAX_INNER_STEPS, MODEL, NO_IMPROVEMENT_LIMIT } from "./config";
 import type { EventLog } from "./events";
 import type { Logger } from "./logger";
-import { type ChatMessage, chat, type OllamaTool } from "./ollama";
+import { type ChatMessage, chat } from "./ollama";
 import * as prompts from "./prompts";
-import { PlanSchema, type RunState } from "./state";
-import { runPublicTests } from "./test-runner";
+import { type Action, ActionSchema, PlanSchema, type RunState } from "./state";
+import { runPublicTests, smokeRun } from "./test-runner";
 import { createTools, FINISH_PHASE, type ToolContext } from "./tools/index";
 import type { AnyTool } from "./tools/types";
 import { truncateHead } from "./truncate";
 import { Workspace } from "./workspace";
-
-function toOllamaTools(tools: AnyTool[]): OllamaTool[] {
-  return tools.map((tool) => ({
-    type: "function" as const,
-    function: { name: tool.name, description: tool.description, parameters: tool.jsonSchema },
-  }));
-}
 
 /** Best-effort JSON extraction (handles fenced or prose-wrapped output). */
 function safeJson(text: string): unknown {
@@ -46,6 +43,22 @@ function safeJson(text: string): unknown {
     if (braced !== undefined) return braced;
   }
   return null;
+}
+
+/** Map a parsed Action to a tool name + argument object for the tool registry. */
+function actionToToolArgs(action: Action): { name: string; args: Record<string, unknown> } {
+  switch (action.tool) {
+    case "read_file":
+      return { name: "read_file", args: { path: action.path } };
+    case "write_file":
+      return { name: "write_file", args: { path: action.path, content: action.content } };
+    case "list_dir":
+      return { name: "list_dir", args: {} };
+    case "run_command":
+      return { name: "run_command", args: { command: action.command } };
+    case "finish_phase":
+      return { name: "finish_phase", args: { summary: action.summary } };
+  }
 }
 
 async function renderFiles(workspace: Workspace): Promise<string> {
@@ -121,7 +134,6 @@ async function doModelPhase(
   events: EventLog,
   systemPrompt: string,
   tools: AnyTool[],
-  ollamaTools: OllamaTool[],
   workspace: Workspace,
 ): Promise<void> {
   if (!state.plan) {
@@ -147,62 +159,58 @@ async function doModelPhase(
   }
   await logger.prompt(state.phase, userPrompt);
 
+  const actionFormat = z.toJSONSchema(ActionSchema);
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
   ];
 
   let finished = false;
-  let noToolTurns = 0;
   for (let step = 0; step < MAX_INNER_STEPS && !finished; step++) {
-    const res = await chat({ messages, tools: ollamaTools });
+    const res = await chat({ messages, format: actionFormat });
     if (res.error) {
       await logger.error("LLM_ERROR", res.error, `${state.phase} step ${step}`, "ending phase, will test");
       await events.errorEvent("LLM_ERROR", res.error);
       break;
     }
+    await events.modelCall(state.phase, res.durationMs, res.usage, 1);
 
-    const assistant = res.message;
-    messages.push(assistant);
-    const calls = assistant.tool_calls ?? [];
-    await events.modelCall(state.phase, res.durationMs, res.usage, calls.length);
-    if (assistant.content.trim()) {
-      await logger.decision(`${state.phase} reasoning`, assistant.content.trim().slice(0, 500));
-    }
-
-    if (calls.length === 0) {
-      noToolTurns++;
-      if (noToolTurns >= 2) break;
+    const parsed = ActionSchema.safeParse(safeJson(res.message.content));
+    if (!parsed.success) {
+      await logger.error(
+        "ACTION_PARSE",
+        parsed.error.message.slice(0, 200),
+        `${state.phase} step ${step}`,
+        "asking model to retry",
+      );
+      await events.errorEvent("ACTION_PARSE", parsed.error.message.slice(0, 150));
+      messages.push({ role: "assistant", content: res.message.content });
       messages.push({
         role: "user",
-        content:
-          "You did not call a tool. Use write_file / read_file / run_command to make progress, or call finish_phase when the code is ready to test.",
+        content: "Your response was not a valid action JSON object. Respond with exactly one action object.",
       });
       continue;
     }
 
-    for (const call of calls) {
-      const name = call.function.name;
-      const tool = tools.find((t) => t.name === name);
-      if (!tool) {
-        messages.push({ role: "tool", tool_name: name, content: `Unknown tool: ${name}` });
-        await events.toolCall(name, false, "unknown tool");
-        continue;
-      }
-      const result = await tool.run(call.function.arguments);
-      messages.push({ role: "tool", tool_name: name, content: result.content });
-      await events.toolCall(name, !result.isError, result.content.slice(0, 140));
+    const action = parsed.data;
+    messages.push({ role: "assistant", content: res.message.content });
+    await logger.decision(`${state.phase} action: ${action.tool}`, action.reasoning);
 
-      if (name === FINISH_PHASE) {
-        await logger.decision("finish_phase", result.content, "TESTING");
-        finished = true;
-        break;
-      }
-      if (name === "write_file") {
-        const path = (call.function.arguments as { path?: unknown }).path;
-        await logger.decision("write_file", typeof path === "string" ? path : "(unknown path)");
-      }
+    const { name, args } = actionToToolArgs(action);
+    const tool = tools.find((t) => t.name === name);
+    if (!tool) {
+      messages.push({ role: "user", content: `Unknown tool: ${name}` });
+      continue;
     }
+    const result = await tool.run(args);
+    await events.toolCall(name, !result.isError, result.content.slice(0, 140));
+
+    if (name === FINISH_PHASE) {
+      await logger.decision("finish_phase", result.content, "TESTING");
+      finished = true;
+      break;
+    }
+    messages.push({ role: "user", content: `Result of ${name}:\n${result.content}` });
   }
 
   state.phase = "TESTING";
@@ -234,6 +242,15 @@ async function doTesting(
     return;
   }
 
+  const fullPass = result.total > 0 && result.score === result.total;
+
+  // Tests did not fully pass — run the program directly so FIXING sees the
+  // real error (syntax errors, tracebacks), not just a bare score.
+  if (!fullPass) {
+    const smoke = await smokeRun(workspace.root, runCommand);
+    result.raw += `\n\n--- PROGRAM SMOKE RUN (${runCommand}, no stdin) ---\n${smoke}`;
+  }
+
   await logger.testRun(result.score, result.total, result.failing_categories, runCommand);
   await events.emit("test_run", {
     score: result.score,
@@ -246,7 +263,7 @@ async function doTesting(
     total: result.total,
   });
 
-  if (result.total > 0 && result.score === result.total) {
+  if (fullPass) {
     state.bestScore = result.score;
     await logger.decision("all tests passing", `${result.score}/${result.total}`, "DONE");
     await events.emit("done", { score: result.score, total: result.total });
@@ -288,7 +305,6 @@ export async function runAgent(state: RunState, logger: Logger, events: EventLog
     },
   };
   const tools = createTools(toolContext);
-  const ollamaTools = toOllamaTools(tools);
   const systemPrompt = prompts.systemPrompt(tools);
 
   await events.emit("run_start", {
@@ -307,7 +323,7 @@ export async function runAgent(state: RunState, logger: Logger, events: EventLog
     if (state.phase === "PLANNING") {
       await doPlanning(state, logger, events);
     } else if (state.phase === "IMPLEMENTING" || state.phase === "FIXING") {
-      await doModelPhase(state, logger, events, systemPrompt, tools, ollamaTools, workspace);
+      await doModelPhase(state, logger, events, systemPrompt, tools, workspace);
     } else if (state.phase === "TESTING") {
       await doTesting(state, logger, events, workspace);
     }
