@@ -4,7 +4,8 @@
 // model cannot drift or react to stale results.
 
 import { z } from "zod";
-import { MAX_INNER_STEPS, NO_IMPROVEMENT_LIMIT } from "./config";
+import { MAX_INNER_STEPS, MODEL, NO_IMPROVEMENT_LIMIT } from "./config";
+import type { EventLog } from "./events";
 import type { Logger } from "./logger";
 import { type ChatMessage, chat, type OllamaTool } from "./ollama";
 import * as prompts from "./prompts";
@@ -60,9 +61,11 @@ async function renderFiles(workspace: Workspace): Promise<string> {
   return parts.join("\n\n");
 }
 
-async function doPlanning(state: RunState, logger: Logger): Promise<void> {
+async function doPlanning(state: RunState, logger: Logger, events: EventLog): Promise<void> {
+  await events.emit("phase_start", { phase: "PLANNING", iteration: state.iteration });
   const prompt = prompts.planningPrompt(state.spec);
   await logger.prompt("PLANNING", prompt);
+
   const res = await chat({
     messages: [
       {
@@ -73,6 +76,7 @@ async function doPlanning(state: RunState, logger: Logger): Promise<void> {
     ],
     format: z.toJSONSchema(PlanSchema),
   });
+  await events.modelCall("PLANNING", res.durationMs, res.usage, 0);
 
   if (!res.error) {
     const parsed = PlanSchema.safeParse(safeJson(res.message.content));
@@ -83,6 +87,11 @@ async function doPlanning(state: RunState, logger: Logger): Promise<void> {
         `run_command="${parsed.data.run_command}", ${parsed.data.steps.length} step(s)`,
         "IMPLEMENTING",
       );
+      await events.emit("plan", {
+        runCommand: parsed.data.run_command,
+        entrypoint: parsed.data.entrypoint,
+        steps: parsed.data.steps.length,
+      });
       state.phase = "IMPLEMENTING";
       return;
     }
@@ -93,9 +102,11 @@ async function doPlanning(state: RunState, logger: Logger): Promise<void> {
       "no usable plan",
       `retry (attempt ${state.planFailures})`,
     );
+    await events.errorEvent("PLAN_PARSE", parsed.error.message.slice(0, 200));
   } else {
     state.planFailures++;
     await logger.error("LLM_ERROR", res.error, "no plan produced", `retry (attempt ${state.planFailures})`);
+    await events.errorEvent("LLM_ERROR", res.error);
   }
 
   if (state.planFailures >= 3) {
@@ -107,6 +118,7 @@ async function doPlanning(state: RunState, logger: Logger): Promise<void> {
 async function doModelPhase(
   state: RunState,
   logger: Logger,
+  events: EventLog,
   systemPrompt: string,
   tools: AnyTool[],
   ollamaTools: OllamaTool[],
@@ -116,6 +128,7 @@ async function doModelPhase(
     state.phase = "FAILED";
     return;
   }
+  await events.emit("phase_start", { phase: state.phase, iteration: state.iteration });
 
   const files = await renderFiles(workspace);
   let userPrompt: string;
@@ -145,16 +158,18 @@ async function doModelPhase(
     const res = await chat({ messages, tools: ollamaTools });
     if (res.error) {
       await logger.error("LLM_ERROR", res.error, `${state.phase} step ${step}`, "ending phase, will test");
+      await events.errorEvent("LLM_ERROR", res.error);
       break;
     }
 
     const assistant = res.message;
     messages.push(assistant);
+    const calls = assistant.tool_calls ?? [];
+    await events.modelCall(state.phase, res.durationMs, res.usage, calls.length);
     if (assistant.content.trim()) {
       await logger.decision(`${state.phase} reasoning`, assistant.content.trim().slice(0, 500));
     }
 
-    const calls = assistant.tool_calls ?? [];
     if (calls.length === 0) {
       noToolTurns++;
       if (noToolTurns >= 2) break;
@@ -171,10 +186,12 @@ async function doModelPhase(
       const tool = tools.find((t) => t.name === name);
       if (!tool) {
         messages.push({ role: "tool", tool_name: name, content: `Unknown tool: ${name}` });
+        await events.toolCall(name, false, "unknown tool");
         continue;
       }
       const result = await tool.run(call.function.arguments);
       messages.push({ role: "tool", tool_name: name, content: result.content });
+      await events.toolCall(name, !result.isError, result.content.slice(0, 140));
 
       if (name === FINISH_PHASE) {
         await logger.decision("finish_phase", result.content, "TESTING");
@@ -191,10 +208,18 @@ async function doModelPhase(
   state.phase = "TESTING";
 }
 
-async function doTesting(state: RunState, logger: Logger, workspace: Workspace): Promise<void> {
+async function doTesting(
+  state: RunState,
+  logger: Logger,
+  events: EventLog,
+  workspace: Workspace,
+): Promise<void> {
+  await events.emit("phase_start", { phase: "TESTING", iteration: state.iteration });
+
   const runCommand = state.plan?.run_command ?? "";
   if (!runCommand) {
     await logger.error("NO_RUN_COMMAND", "plan has no run_command", "cannot test", "moving to FIXING");
+    await events.errorEvent("NO_RUN_COMMAND", "plan has no run_command");
     state.phase = "FIXING";
     return;
   }
@@ -204,11 +229,17 @@ async function doTesting(state: RunState, logger: Logger, workspace: Workspace):
 
   if (result.error && result.total === 0) {
     await logger.error("TEST_RUNNER", result.error, "no score this iteration", "moving to FIXING");
+    await events.errorEvent("TEST_RUNNER", result.error);
     state.phase = "FIXING";
     return;
   }
 
   await logger.testRun(result.score, result.total, result.failing_categories, runCommand);
+  await events.emit("test_run", {
+    score: result.score,
+    total: result.total,
+    failing: result.failing_categories,
+  });
   state.scoreProgression.push({
     ts: new Date().toISOString(),
     score: result.score,
@@ -218,6 +249,7 @@ async function doTesting(state: RunState, logger: Logger, workspace: Workspace):
   if (result.total > 0 && result.score === result.total) {
     state.bestScore = result.score;
     await logger.decision("all tests passing", `${result.score}/${result.total}`, "DONE");
+    await events.emit("done", { score: result.score, total: result.total });
     state.phase = "DONE";
     return;
   }
@@ -227,6 +259,11 @@ async function doTesting(state: RunState, logger: Logger, workspace: Workspace):
     state.noImprovementStreak = 0;
     state.lastGoodSnapshot = await workspace.snapshot();
     await logger.decision("score improved", `new best ${result.score}/${result.total}`, "FIXING");
+    await events.emit("score_improved", {
+      score: result.score,
+      total: result.total,
+      bestScore: state.bestScore,
+    });
   } else {
     state.noImprovementStreak++;
     if (result.score < state.bestScore && state.lastGoodSnapshot) {
@@ -236,12 +273,13 @@ async function doTesting(state: RunState, logger: Logger, workspace: Workspace):
         `score ${result.score} < best ${state.bestScore}; restored last-good workspace`,
         "FIXING",
       );
+      await events.emit("rollback", { score: result.score, bestScore: state.bestScore });
     }
   }
   state.phase = "FIXING";
 }
 
-export async function runAgent(state: RunState, logger: Logger): Promise<void> {
+export async function runAgent(state: RunState, logger: Logger, events: EventLog): Promise<void> {
   const workspace = new Workspace(state.workspaceDir);
   const toolContext: ToolContext = {
     workspace,
@@ -253,25 +291,44 @@ export async function runAgent(state: RunState, logger: Logger): Promise<void> {
   const ollamaTools = toOllamaTools(tools);
   const systemPrompt = prompts.systemPrompt(tools);
 
+  await events.emit("run_start", {
+    model: MODEL,
+    spec: state.specPath,
+    workspace: state.workspaceDir,
+    maxIterations: state.maxIterations,
+  });
+  await events.writeState(state);
+
   while (
     state.iteration < state.maxIterations &&
     state.phase !== "DONE" &&
     state.phase !== "FAILED"
   ) {
     if (state.phase === "PLANNING") {
-      await doPlanning(state, logger);
+      await doPlanning(state, logger, events);
     } else if (state.phase === "IMPLEMENTING" || state.phase === "FIXING") {
-      await doModelPhase(state, logger, systemPrompt, tools, ollamaTools, workspace);
+      await doModelPhase(state, logger, events, systemPrompt, tools, ollamaTools, workspace);
     } else if (state.phase === "TESTING") {
-      await doTesting(state, logger, workspace);
+      await doTesting(state, logger, events, workspace);
     }
 
     state.iteration++;
+    await events.writeState(state);
     console.log(`iteration ${state.iteration}: phase -> ${state.phase}`);
 
     if (state.dryRun) {
       console.log("[dry-run] stopping after one phase");
+      await events.emit("dry_run_stop", { phase: state.phase });
       return;
     }
   }
+
+  await events.emit("run_end", {
+    phase: state.phase,
+    bestScore: state.bestScore,
+    score: state.lastTestResult?.score ?? null,
+    total: state.lastTestResult?.total ?? null,
+    iterations: state.iteration,
+  });
+  await events.writeState(state);
 }

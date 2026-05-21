@@ -5,6 +5,7 @@
 
 import { resolve } from "node:path";
 import { MAX_ITERATIONS, MODEL } from "./config";
+import { EventLog } from "./events";
 import { Logger } from "./logger";
 import { runAgent } from "./loop";
 import { checkOllama } from "./ollama";
@@ -54,6 +55,7 @@ async function main(): Promise<number> {
   }
 
   const logger = await Logger.create(args.logDir);
+  const events = await EventLog.create(args.logDir);
 
   const ollama = await checkOllama();
   if (!ollama.ok) {
@@ -91,11 +93,13 @@ async function main(): Promise<number> {
   console.log(`agent: model=${MODEL} workspace=${workspaceDir} spec=${args.spec}`);
 
   try {
-    await runAgent(state, logger);
+    await runAgent(state, logger, events);
   } catch (err) {
     const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
     await logger.error("FATAL", detail, "run aborted", "see errors.log");
+    await events.errorEvent("FATAL", detail.slice(0, 300));
     state.phase = "FAILED";
+    await events.writeState(state);
   }
 
   await logger.writeFinalReport(buildFinalReport(state));

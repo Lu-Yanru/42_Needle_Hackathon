@@ -49,8 +49,12 @@ Flags: `--dry-run` (one phase, then stop), `--max-iter N`, `--log-dir <dir>`.
 
 ## Output
 
-- `agent_logs/` — `prompts.log`, `decisions.log`, `commands.log`,
-  `test_runs.log`, `errors.log`, `human_interventions.log`, `final_report.md`
+- `agent_logs/` — the 7 judge-facing text logs: `prompts.log`, `decisions.log`,
+  `commands.log`, `test_runs.log`, `errors.log`, `human_interventions.log`,
+  `final_report.md`
+- `agent_logs/run.jsonl` + `agent_logs/state.json` — structured event stream
+  for the dashboard (append-only timeline + current-status snapshot, incl.
+  token usage). The agent only writes these; the dashboard reads them.
 - `agent_manifest.json` — model/tool disclosure
 - the program itself, in the `--workspace` directory
 
@@ -69,7 +73,8 @@ apps/agent/src/
 ├── ollama.ts        Ollama /api/chat client (native tool calling)
 ├── tools/           read_file · write_file · list_dir · run_command · finish_phase
 ├── workspace.ts     path-sandboxed file ops + snapshot/restore
-├── logger.ts        the 7 agent_logs files
+├── logger.ts        the 7 agent_logs text files
+├── events.ts        run.jsonl + state.json (structured stream for the dashboard)
 ├── prompts.ts       system + per-phase prompts
 ├── test-runner.ts   runs and parses the public test suite
 ├── submission.ts    agent_manifest.json + final report

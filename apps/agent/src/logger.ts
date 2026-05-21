@@ -1,7 +1,6 @@
 // Structured, timestamped logging into the 7 files judges require under
 // agent_logs/. human_interventions.log is created with a header and filled
 // by hand; final_report.md is written once at the end of a run.
-// Uses Bun's native file APIs (Bun.file / Bun.write).
 
 import { join, resolve } from "node:path";
 
@@ -65,16 +64,28 @@ export class Logger {
   }
 
   async prompt(phase: string, text: string): Promise<void> {
-    await this.append("prompts.log", `${timestamp()} PROMPT (phase=${phase})\n${text}\n`);
+    await this.append(
+      "prompts.log",
+      `${timestamp()} PROMPT (phase=${phase})\n${text}\n`,
+    );
   }
 
   async decision(decision: string, reason: string, next = ""): Promise<void> {
-    const lines = [`${timestamp()} DECISION`, `Decision: ${decision}`, `Reason: ${reason}`];
+    const lines = [
+      `${timestamp()} DECISION`,
+      `Decision: ${decision}`,
+      `Reason: ${reason}`,
+    ];
     if (next) lines.push(`Next: ${next}`);
     await this.append("decisions.log", `${lines.join("\n")}\n`);
   }
 
-  async command(command: string, exitCode: number, summary: string, runBy = "agent"): Promise<void> {
+  async command(
+    command: string,
+    exitCode: number,
+    summary: string,
+    runBy = "agent",
+  ): Promise<void> {
     const lines = [
       `${timestamp()} COMMAND`,
       `Run by: ${runBy}`,
@@ -85,7 +96,12 @@ export class Logger {
     await this.append("commands.log", `${lines.join("\n")}\n`);
   }
 
-  async testRun(score: number, total: number, failing: string[], command: string): Promise<void> {
+  async testRun(
+    score: number,
+    total: number,
+    failing: string[],
+    command: string,
+  ): Promise<void> {
     const lines = [
       `${timestamp()} TEST_RUN`,
       `Command: ${command}`,
@@ -95,7 +111,12 @@ export class Logger {
     await this.append("test_runs.log", `${lines.join("\n")}\n`);
   }
 
-  async error(type: string, what: string, impact: string, action: string): Promise<void> {
+  async error(
+    type: string,
+    what: string,
+    impact: string,
+    action: string,
+  ): Promise<void> {
     const lines = [
       `${timestamp()} ERROR`,
       `Type: ${type}`,

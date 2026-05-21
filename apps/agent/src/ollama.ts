@@ -1,6 +1,7 @@
 // Ollama /api/chat client. Native tool calling + structured (JSON-schema)
-// output. chat() NEVER throws — failures are encoded in the result (a pattern
-// borrowed from pi's "stream function must not throw" rule).
+// output, plus token-usage capture. chat() NEVER throws — failures are
+// encoded in the result (a pattern borrowed from pi's "stream function must
+// not throw" rule).
 
 import {
   KEEP_ALIVE,
@@ -35,9 +36,17 @@ export interface ChatOptions {
   model?: string;
 }
 
+/** Token usage for one model call. */
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface ChatResult {
   message: ChatMessage;
   doneReason: string;
+  usage: Usage;
   error?: string;
   durationMs: number;
 }
@@ -45,7 +54,11 @@ export interface ChatResult {
 interface OllamaChatResponse {
   message?: ChatMessage;
   done_reason?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
 }
+
+const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
 export async function chat(options: ChatOptions): Promise<ChatResult> {
   const started = Date.now();
@@ -76,9 +89,12 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
         continue;
       }
       const data = (await res.json()) as OllamaChatResponse;
+      const inputTokens = data.prompt_eval_count ?? 0;
+      const outputTokens = data.eval_count ?? 0;
       return {
         message: data.message ?? { role: "assistant", content: "" },
         doneReason: data.done_reason ?? "stop",
+        usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
         durationMs: Date.now() - started,
       };
     } catch (err) {
@@ -91,6 +107,7 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
   return {
     message: { role: "assistant", content: "" },
     doneReason: "error",
+    usage: NO_USAGE,
     error: lastError || "unknown Ollama error",
     durationMs: Date.now() - started,
   };
