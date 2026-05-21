@@ -11,11 +11,10 @@ import { FileSystemError } from "./errors";
 import type { Usage } from "./ollama";
 import type { Phase, RunState, ScorePoint } from "./state";
 
-export interface RunEvent {
+export interface RunEvent extends Record<string, unknown> {
   seq: number;
   ts: string;
   type: string;
-  [key: string]: unknown;
 }
 
 export interface RunStateSnapshot {
@@ -58,7 +57,8 @@ export class EventLog {
     const existing = (
       await Result.tryPromise({
         try: () => Bun.file(runPath).text(),
-        catch: (cause) => new FileSystemError({ operation: "read", path: runPath, cause }),
+        catch: (cause) =>
+          new FileSystemError({ operation: "read", path: runPath, cause }),
       })
     ).unwrapOr("");
     log.seq = existing.trim() ? existing.trim().split("\n").length : 0;
@@ -71,13 +71,19 @@ export class EventLog {
 
   /** Append one event to run.jsonl. */
   async emit(type: string, data: Record<string, unknown> = {}): Promise<void> {
-    const event: RunEvent = { seq: this.seq++, ts: new Date().toISOString(), type, ...data };
+    const event: RunEvent = {
+      seq: this.seq++,
+      ts: new Date().toISOString(),
+      type,
+      ...data,
+    };
     const file = this.path("run.jsonl");
     // A missing file reads as empty — failures collapse to "".
     const existing = (
       await Result.tryPromise({
         try: () => Bun.file(file).text(),
-        catch: (cause) => new FileSystemError({ operation: "read", path: file, cause }),
+        catch: (cause) =>
+          new FileSystemError({ operation: "read", path: file, cause }),
       })
     ).unwrapOr("");
     await Bun.write(file, `${existing}${JSON.stringify(event)}\n`);
@@ -131,6 +137,9 @@ export class EventLog {
       errors: this.errors,
       done: state.phase === "DONE" || state.phase === "FAILED",
     };
-    await Bun.write(this.path("state.json"), `${JSON.stringify(snapshot, null, 2)}\n`);
+    await Bun.write(
+      this.path("state.json"),
+      `${JSON.stringify(snapshot, null, 2)}\n`,
+    );
   }
 }

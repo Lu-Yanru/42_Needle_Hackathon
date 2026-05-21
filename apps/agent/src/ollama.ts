@@ -58,7 +58,9 @@ interface OllamaChatResponse {
   eval_count?: number;
 }
 
-export async function chat(options: ChatOptions): Promise<Result<ChatResult, OllamaError>> {
+export async function chat(
+  options: ChatOptions,
+): Promise<Result<ChatResult, OllamaError>> {
   const started = Date.now();
   const body: Record<string, unknown> = {
     model: options.model ?? MODEL,
@@ -92,7 +94,11 @@ export async function chat(options: ChatOptions): Promise<Result<ChatResult, Oll
       return Result.ok({
         message: data.message ?? { role: "assistant", content: "" },
         doneReason: data.done_reason ?? "stop",
-        usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
+        usage: {
+          inputTokens,
+          outputTokens,
+          totalTokens: inputTokens + outputTokens,
+        },
         durationMs: Date.now() - started,
       });
     } catch (err) {
@@ -102,7 +108,9 @@ export async function chat(options: ChatOptions): Promise<Result<ChatResult, Oll
     }
   }
 
-  return Result.err(new OllamaError({ message: lastError || "unknown Ollama error" }));
+  return Result.err(
+    new OllamaError({ message: lastError || "unknown Ollama error" }),
+  );
 }
 
 /** Verify Ollama is reachable and the model is pulled. */
@@ -117,11 +125,11 @@ export async function checkOllama(
         cause,
       }),
   });
-  if (fetched.isErr()) return fetched;
-
   const res = fetched.value;
   if (!res.ok) {
-    return Result.err(new OllamaError({ message: `Ollama responded HTTP ${res.status}` }));
+    return Result.err(
+      new OllamaError({ message: `Ollama responded HTTP ${res.status}` }),
+    );
   }
   const data = (await res.json()) as { models?: { name: string }[] };
   const names = (data.models ?? []).map((m) => m.name);
@@ -132,5 +140,7 @@ export async function checkOllama(
       }),
     );
   }
-  return Result.ok({ detail: `Ollama ready at ${OLLAMA_URL}, model ${model} available` });
+  return Result.ok({
+    detail: `Ollama ready at ${OLLAMA_URL}, model ${model} available`,
+  });
 }
