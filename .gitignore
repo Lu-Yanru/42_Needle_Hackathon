@@ -209,6 +209,10 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Agent logs — keep .gitkeep placeholder, ignore runtime files
+agent_logs/*.log
+agent_logs/final_report.md
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
