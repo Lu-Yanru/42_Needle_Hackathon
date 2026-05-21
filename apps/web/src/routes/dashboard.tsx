@@ -210,7 +210,6 @@ function OperatorConsole() {
     <>
       <StatusBar
         run={snap.run}
-        stats={snap.stats}
         deadline={snap.deadline}
         dataUpdatedAt={query.dataUpdatedAt}
         view={view}

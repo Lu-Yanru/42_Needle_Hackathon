@@ -1,6 +1,6 @@
 // Top-row panels: StatusBar, ScoreChart, FailingCategories, SubmissionChecklist.
 
-import type { ChecklistItem, ControlAction, RunState, RunStats, ScorePoint } from "@needle-agent/api/agent/types";
+import type { ChecklistItem, ControlAction, RunState, ScorePoint } from "@needle-agent/api/agent/types";
 import { Area, AreaChart, CartesianGrid, ReferenceDot, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { formatCountdown, formatElapsed, formatRelativeMs, useTicker } from "./format";
@@ -16,16 +16,10 @@ const C = {
 
 const PHASES = ["PLANNING", "GENERATE_TESTS", "IMPLEMENTING", "TESTING", "FIXING", "DONE"] as const;
 
-/** Compact thousands formatting for token counts. */
-function fmtK(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-}
-
 // ---------- STATUS BAR ----------
 
 interface StatusBarProps {
   run: RunState;
-  stats: RunStats;
   deadline: string;
   /** Epoch ms of the last successful poll, for the "last update" tooltip. */
   dataUpdatedAt: number;
@@ -37,7 +31,6 @@ interface StatusBarProps {
 
 export function StatusBar({
   run,
-  stats,
   deadline,
   dataUpdatedAt,
   view,
@@ -110,7 +103,7 @@ export function StatusBar({
                 return (
                   <div key={p} className={`step ${cls}`}>
                     <span className="step-dot" />
-                    <span>{p === "GENERATE_TESTS" ? "GEN TESTS" : p}</span>
+                    <span>{p === "GENERATE_TESTS" ? "GEN" : p}</span>
                   </div>
                 );
               })}
@@ -128,18 +121,6 @@ export function StatusBar({
             </div>
             <div>
               <span className="lab">ELAPSED</span> <span className="val">{formatElapsed(elapsed)}</span>
-            </div>
-            <div>
-              <span className="lab">CALLS</span>{" "}
-              <span className="val">
-                {stats.modelCalls}
-                <span className="dim">m</span> {stats.toolCalls}
-                <span className="dim">t</span>
-              </span>
-            </div>
-            <div>
-              <span className="lab">TOKENS</span>{" "}
-              <span className="val">{fmtK(stats.inputTokens + stats.outputTokens)}</span>
             </div>
           </div>
         </div>
