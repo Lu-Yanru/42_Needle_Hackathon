@@ -1,5 +1,5 @@
 import type { AppRouterClient } from "@needle-agent/api/routers/index";
-import { Toaster } from "@needle-agent/ui/components/sonner";
+import { Toaster } from "@/components/ui/sonner";
 import { createORPCClient } from "@orpc/client";
 import { createTanstackQueryUtils } from "@orpc/tanstack-query";
 import type { QueryClient } from "@tanstack/react-query";

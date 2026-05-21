@@ -1,4 +1,4 @@
-import { cn } from "@needle-agent/ui/lib/utils";
+import { cn } from "@/lib/utils";
 import * as React from "react";
 
 function Label({ className, ...props }: React.ComponentProps<"label">) {

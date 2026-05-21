@@ -18,8 +18,7 @@ spec, writes code, runs tests, and iterates — plus a web app and API to drive 
 │   ├── auth/     Better Auth configuration
 │   ├── config/   shared TypeScript config
 │   ├── db/       Drizzle ORM schema and client (bun:sqlite)
-│   ├── env/      typed, validated environment variables
-│   └── ui/       shared shadcn/ui components
+│   └── env/      typed, validated environment variables
 └── docs/         plan, tasks, and official hackathon docs
 ```
 

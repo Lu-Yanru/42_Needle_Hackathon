@@ -1,6 +1,6 @@
-import { Button } from "@needle-agent/ui/components/button";
-import { Input } from "@needle-agent/ui/components/input";
-import { Label } from "@needle-agent/ui/components/label";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useForm } from "@tanstack/react-form";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
