@@ -112,23 +112,23 @@ ______________________________________________________________________
 
 ### 12:00 - 13:00 (solo)
 
-- [ ] Install Ollama + venv
-- [ ] Stub `agent/tools.py` with the four functions from `PLAN.md` Phase 1
-- [ ] Stub `agent/logger.py` — empty `AgentLogger` class with method signatures
+- [x] Install Ollama + venv
+- [x] Stub `agent/tools.py` with the four functions from `PLAN.md` Phase 1
+- [x] Stub `agent/logger.py` — empty `AgentLogger` class with method signatures
 
 ### 13:00 - 15:00 (Phase 1c + Phase 2)
 
-- [ ] Implement `tools.py`: `read_file`, `write_file`, `run_command` (capture stdout/stderr/exit_code, configurable timeout), `list_dir`
-- [ ] Implement `logger.py` with all 6 log methods + `write_final_report`
-- [ ] Every method prepends `[YYYY-MM-DD HH:MM:SS]`
-- [ ] Logs auto-create `agent_logs/` if missing
-- [ ] Create empty `agent_logs/human_interventions.log` with a comment header — this one we fill by hand
+- [x] Implement `tools.py`: `read_file`, `write_file`, `run_command` (capture stdout/stderr/exit_code, configurable timeout), `list_dir`
+- [x] Implement `logger.py` with all 6 log methods + `write_final_report`
+- [x] Every method prepends `[YYYY-MM-DD HH:MM:SS]`
+- [x] Logs auto-create `agent_logs/` if missing
+- [x] Create empty `agent_logs/human_interventions.log` with a comment header — this one we fill by hand
 
 ### 15:00 - 17:00 (Phase 5 rollback)
 
-- [ ] Snapshot helper: before any `write_file`, save current content to in-memory dict keyed by path
-- [ ] `restore_snapshot(path)` for B's regression-detection logic
-- [ ] Test: write file → snapshot → overwrite → restore → diff is empty
+- [x] Snapshot helper: before any `write_file`, save current content to in-memory dict keyed by path
+- [x] `restore_snapshot(path)` for B's regression-detection logic
+- [x] Test: write file → snapshot → overwrite → restore → diff is empty
 
 ### 17:00 - 19:00 (Phase 7)
 
