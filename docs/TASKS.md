@@ -50,27 +50,27 @@ ______________________________________________________________________
 
 ### 12:00 - 13:00 (solo)
 
-- [ ] Install Ollama, pull `qwen2.5-coder:7b` (and `deepseek-coder:6.7b` as fallback)
-- [ ] Verify `curl http://localhost:11434/api/generate -d '{"model":"qwen2.5-coder:7b","prompt":"hi","stream":false}'` returns
-- [ ] Create skeleton `src/agent/llm.py` with `call_model(prompt, system="") -> str`
-- [ ] Write a `requirements.txt` with `requests` only
+- [x] Install Ollama, pull `qwen2.5-coder:7b` (and `deepseek-coder:6.7b` as fallback)
+- [x] Verify `curl http://localhost:11434/api/generate -d '{"model":"qwen2.5-coder:7b","prompt":"hi","stream":false}'` returns
+- [x] Create skeleton `src/agent/llm.py` with `call_model(prompt, system="") -> str`
+- [x] Write a `requirements.txt` with `requests` only
 
 ### 13:00 - 15:00
 
-- [ ] Harden `call_model`: timeout 120s, 2 retries on connection error, surface stop reason
-- [ ] Add `call_model_json(prompt, schema_hint)` that retries up to 3x if response isn't valid JSON
-- [ ] Document model choice + endpoint in a 5-line comment at top of `llm.py`
+- [x] Harden `call_model`: timeout 120s, 2 retries on connection error, surface stop reason
+- [x] Add `call_model_json(prompt, schema_hint)` that retries up to 3x if response isn't valid JSON
+- [x] Document model choice + endpoint in a 5-line comment at top of `llm.py`
 
 ### 15:00 - 17:00 (Phase 4b — test runner glue)
 
-- [ ] Write `src/agent/test_runner.py`:
+- [x] Write `src/agent/test_runner.py`:
   - `run_public_tests(workspace, program_cmd) -> dict` with `{score, total, failing_categories, raw}`
   - Robust to missing `secret_spec/test_runner/` — return a clear error dict
 - [ ] Decide on a parseable output convention with D's toy tests
 
 ### 17:00 - 19:00
 
-- [ ] Stretch: warm fallback to `deepseek-coder:6.7b` if `qwen2.5-coder:7b` errors 3x
+- [x] Stretch: warm fallback to `deepseek-coder:6.7b` if `qwen2.5-coder:7b` errors 3x
 - [ ] Help B debug whatever the model keeps refusing to output as JSON
 
 ______________________________________________________________________
@@ -81,27 +81,27 @@ ______________________________________________________________________
 
 ### 12:00 - 13:00 (solo)
 
-- [ ] Install Ollama + venv (same as A)
-- [ ] Stub `src/agent/run_agent.py` with the loop skeleton from `PLAN.md` Phase 1
-- [ ] Stub `src/agent/prompts.py` with three string templates: `PLANNING`, `IMPLEMENTING`, `FIXING`
+- [x] Install Ollama + venv (same as A)
+- [x] Stub `src/agent/run_agent.py` with the loop skeleton from `PLAN.md` Phase 1
+- [x] Stub `src/agent/prompts.py` with three string templates: `PLANNING`, `IMPLEMENTING`, `FIXING`
 
 ### 13:00 - 15:00 (Phase 1b)
 
-- [ ] Build the main loop: state dict, iteration counter, action dispatch
-- [ ] Define the action JSON schema: `{action, path?, content?, command?, reasoning}`
-- [ ] Add `--dry-run` flag (one model call, no side effects) — needed for D's smoke tests
-- [ ] Wire A's `llm.py` + C's `tools.py` (use stubs if not ready)
+- [x] Build the main loop: state dict, iteration counter, action dispatch
+- [x] Define the action JSON schema: `{action, path?, content?, command?, reasoning}`
+- [x] Add `--dry-run` flag (one model call, no side effects) — needed for D's smoke tests
+- [x] Wire A's `llm.py` + C's `tools.py` (use stubs if not ready)
 
 ### 15:00 - 17:00 (Phase 3)
 
-- [ ] Write planning prompt (see `PLAN.md` Phase 3 example)
-- [ ] Add `PLANNING -> IMPLEMENTING -> TESTING -> FIXING` state machine
-- [ ] Save parsed plan JSON to `agent_logs/plan.json` for inspection
+- [x] Write planning prompt (see `PLAN.md` Phase 3 example)
+- [x] Add `PLANNING -> IMPLEMENTING -> TESTING -> FIXING` state machine
+- [x] Save parsed plan JSON to `agent_logs/plan.json` for inspection
 
 ### 17:00 - 19:00 (Phase 5a)
 
-- [ ] Implement fix-loop prompt with explicit "ONE category, no full rewrite, no debug prints"
-- [ ] Add anti-thrash guard: 3 consecutive no-improvement → force analysis prompt
+- [x] Implement fix-loop prompt with explicit "ONE category, no full rewrite, no debug prints"
+- [x] Add anti-thrash guard: 3 consecutive no-improvement → force analysis prompt
 - [ ] Coordinate with C on snapshot/rollback API
 
 ______________________________________________________________________

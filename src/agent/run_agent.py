@@ -47,8 +47,12 @@ STATES = ("PLANNING", "IMPLEMENTING", "TESTING", "FIXING", "DONE")
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--spec", required=True, help="Path to the spec markdown file")
-    p.add_argument("--workspace", default=WORKSPACE_DEFAULT, help="Where the agent writes code")
-    p.add_argument("--dry-run", action="store_true", help="One model call, no side effects")
+    p.add_argument(
+        "--workspace", default=WORKSPACE_DEFAULT, help="Where the agent writes code"
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="One model call, no side effects"
+    )
     p.add_argument("--max-iter", type=int, default=MAX_ITERATIONS)
     return p.parse_args()
 
@@ -61,14 +65,14 @@ def build_initial_state(spec_path: str, workspace: str) -> dict:
         "workspace": workspace,
         "phase": "PLANNING",
         "plan": None,
-        "files": {},               # path -> last known content
+        "files": {},  # path -> last known content
         "last_test_result": None,  # {score, total, failing_categories, raw}
         "best_score": -1,
         "no_improvement_streak": 0,
         "consecutive_llm_errors": 0,
         "iteration": 0,
-        "recent_attempts": [],     # last N decisions, for stuck-analysis
-        "score_progression": [],   # list of (ts, score, total)
+        "recent_attempts": [],  # last N decisions, for stuck-analysis
+        "score_progression": [],  # list of (ts, score, total)
     }
 
 
@@ -81,7 +85,9 @@ def build_prompt(state: dict) -> str:
         return prompts.IMPLEMENTING_PROMPT.format(
             plan=json.dumps(state["plan"], indent=2),
             files=_render_files(state["files"]),
-            last_test_result=json.dumps(state["last_test_result"], indent=2) if state["last_test_result"] else "none yet",
+            last_test_result=json.dumps(state["last_test_result"], indent=2)
+            if state["last_test_result"]
+            else "none yet",
         )
 
     if state["phase"] == "FIXING":
