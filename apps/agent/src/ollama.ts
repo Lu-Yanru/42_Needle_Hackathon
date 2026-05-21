@@ -1,7 +1,6 @@
 // Ollama /api/chat client. Native tool calling + structured (JSON-schema)
 // output, plus token-usage capture. chat() NEVER throws — failures are
-// encoded in the result (a pattern borrowed from pi's "stream function must
-// not throw" rule).
+// encoded in the result.
 
 import {
   KEEP_ALIVE,

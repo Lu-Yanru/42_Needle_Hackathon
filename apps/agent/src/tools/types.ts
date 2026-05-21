@@ -1,4 +1,4 @@
-// Tool abstraction — a minimized version of pi's AgentTool.
+// Tool abstraction.
 // A tool carries a zod schema (validated before execute, converted to JSON
 // Schema for Ollama) and returns a structured result (content + details).
 

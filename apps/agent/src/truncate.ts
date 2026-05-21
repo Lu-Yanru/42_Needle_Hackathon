@@ -1,5 +1,4 @@
 // Output truncation by lines AND bytes — whichever limit is hit first.
-// Ported from the pi agent harness (packages/agent/src/harness/utils/truncate.ts).
 // truncateHead keeps the start (good for file reads); truncateTail keeps the
 // end (good for command/test output, where errors live at the bottom).
 
