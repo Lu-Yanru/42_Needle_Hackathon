@@ -3,6 +3,8 @@
 // Uses Bun's native APIs: Bun.file, Bun.write, Bun.Glob.
 
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { Result } from "better-result";
+import { FileSystemError, WorkspacePathError } from "./errors";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", ".turbo", "dist"]);
 
@@ -14,62 +16,103 @@ export class Workspace {
   }
 
   /** Resolve a path, rejecting anything that escapes the workspace root. */
-  resolvePath(path: string): string {
+  resolvePath(path: string): Result<string, WorkspacePathError> {
     const full = resolve(isAbsolute(path) ? path : join(this.root, path));
     const rel = relative(this.root, full);
     if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
-      throw new Error(`path "${path}" escapes the workspace`);
+      return Result.err(new WorkspacePathError({ path }));
     }
-    return full;
+    return Result.ok(full);
   }
 
-  async readFile(path: string): Promise<string> {
-    const file = Bun.file(this.resolvePath(path));
-    return (await file.exists()) ? file.text() : "";
+  async readFile(path: string): Promise<Result<string, FileSystemError | WorkspacePathError>> {
+    const resolved = this.resolvePath(path);
+    if (resolved.isErr()) return resolved;
+    return Result.tryPromise({
+      try: async () => {
+        const file = Bun.file(resolved.value);
+        return (await file.exists()) ? file.text() : "";
+      },
+      catch: (cause) => new FileSystemError({ operation: "read", path, cause }),
+    });
   }
 
-  async fileExists(path: string): Promise<boolean> {
-    return Bun.file(this.resolvePath(path)).exists();
+  async fileExists(path: string): Promise<Result<boolean, FileSystemError | WorkspacePathError>> {
+    const resolved = this.resolvePath(path);
+    if (resolved.isErr()) return resolved;
+    return Result.tryPromise({
+      try: () => Bun.file(resolved.value).exists(),
+      catch: (cause) => new FileSystemError({ operation: "exists", path, cause }),
+    });
   }
 
-  async writeFile(path: string, content: string): Promise<void> {
-    // Bun.write creates any missing parent directories.
-    await Bun.write(this.resolvePath(path), content);
+  async writeFile(
+    path: string,
+    content: string,
+  ): Promise<Result<void, FileSystemError | WorkspacePathError>> {
+    const resolved = this.resolvePath(path);
+    if (resolved.isErr()) return resolved;
+    return Result.tryPromise({
+      try: async () => {
+        // Bun.write creates any missing parent directories.
+        await Bun.write(resolved.value, content);
+      },
+      catch: (cause) => new FileSystemError({ operation: "write", path, cause }),
+    });
   }
 
   /** Every file in the workspace, as paths relative to the root, sorted. */
-  async listFiles(): Promise<string[]> {
+  async listFiles(): Promise<Result<string[], FileSystemError>> {
     const glob = new Bun.Glob("**/*");
     const out: string[] = [];
-    try {
-      for await (const rel of glob.scan({ cwd: this.root, onlyFiles: true, dot: false })) {
-        if (rel.split("/").some((segment) => SKIP_DIRS.has(segment))) continue;
-        out.push(rel);
-      }
-    } catch {
-      return []; // workspace directory does not exist yet
-    }
-    return out.sort((a, b) => a.localeCompare(b));
+    const scanned = await Result.tryPromise({
+      try: async () => {
+        for await (const rel of glob.scan({ cwd: this.root, onlyFiles: true, dot: false })) {
+          if (rel.split("/").some((segment) => SKIP_DIRS.has(segment))) continue;
+          out.push(rel);
+        }
+      },
+      catch: (cause) => new FileSystemError({ operation: "list", path: this.root, cause }),
+    });
+    // A missing workspace directory is not an error here — return an empty list.
+    if (scanned.isErr()) return Result.ok([]);
+    return Result.ok(out.sort((a, b) => a.localeCompare(b)));
   }
 
   /** Snapshot every file (path -> content). */
-  async snapshot(): Promise<Map<string, string>> {
+  async snapshot(): Promise<Result<Map<string, string>, FileSystemError | WorkspacePathError>> {
+    const files = await this.listFiles();
+    if (files.isErr()) return files;
     const snap = new Map<string, string>();
-    for (const rel of await this.listFiles()) {
-      snap.set(rel, await this.readFile(rel));
+    for (const rel of files.value) {
+      const content = await this.readFile(rel);
+      if (content.isErr()) return content;
+      snap.set(rel, content.value);
     }
-    return snap;
+    return Result.ok(snap);
   }
 
   /** Restore to a snapshot: delete files created since, rewrite the rest. */
-  async restore(snap: Map<string, string>): Promise<void> {
-    for (const rel of await this.listFiles()) {
+  async restore(
+    snap: Map<string, string>,
+  ): Promise<Result<void, FileSystemError | WorkspacePathError>> {
+    const files = await this.listFiles();
+    if (files.isErr()) return files;
+    for (const rel of files.value) {
       if (!snap.has(rel)) {
-        await Bun.file(this.resolvePath(rel)).delete();
+        const resolved = this.resolvePath(rel);
+        if (resolved.isErr()) return resolved;
+        const deleted = await Result.tryPromise({
+          try: () => Bun.file(resolved.value).delete(),
+          catch: (cause) => new FileSystemError({ operation: "delete", path: rel, cause }),
+        });
+        if (deleted.isErr()) return deleted;
       }
     }
     for (const [rel, content] of snap) {
-      await Bun.write(this.resolvePath(rel), content);
+      const written = await this.writeFile(rel, content);
+      if (written.isErr()) return written;
     }
+    return Result.ok(undefined);
   }
 }

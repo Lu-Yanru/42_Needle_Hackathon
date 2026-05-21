@@ -4,7 +4,7 @@
 //                 [--dry-run] [--max-iter N] [--log-dir agent_logs]
 
 import { resolve } from "node:path";
-import { MAX_ITERATIONS, MODEL } from "./config";
+import { MAX_ITERATIONS, MODEL, TEST_COMMAND } from "./config";
 import { EventLog } from "./events";
 import { Logger } from "./logger";
 import { runAgent } from "./loop";
@@ -18,6 +18,7 @@ interface Args {
   dryRun: boolean;
   maxIter: number;
   logDir: string;
+  testCmd: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -27,6 +28,7 @@ function parseArgs(argv: string[]): Args {
     dryRun: false,
     maxIter: MAX_ITERATIONS,
     logDir: "agent_logs",
+    testCmd: TEST_COMMAND,
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -35,6 +37,7 @@ function parseArgs(argv: string[]): Args {
     else if (flag === "--dry-run") args.dryRun = true;
     else if (flag === "--max-iter") args.maxIter = Number(argv[++i] ?? args.maxIter);
     else if (flag === "--log-dir") args.logDir = argv[++i] ?? args.logDir;
+    else if (flag === "--test-cmd") args.testCmd = argv[++i] ?? args.testCmd;
   }
   return args;
 }
@@ -43,7 +46,7 @@ async function main(): Promise<number> {
   const args = parseArgs(Bun.argv.slice(2));
   if (!args.spec) {
     console.error(
-      "usage: bun run start --spec <path/to/SPEC.md> [--workspace ./solution] [--dry-run] [--max-iter N] [--log-dir agent_logs]",
+      'usage: bun run start --spec <path/to/SPEC.md> [--workspace ./solution] [--dry-run] [--max-iter N] [--log-dir agent_logs] [--test-cmd "<cmd>"]',
     );
     return 2;
   }
@@ -58,17 +61,17 @@ async function main(): Promise<number> {
   const events = await EventLog.create(args.logDir);
 
   const ollama = await checkOllama();
-  if (!ollama.ok) {
-    console.error(`Ollama not ready: ${ollama.detail}`);
+  if (ollama.isErr()) {
+    console.error(`Ollama not ready: ${ollama.error.message}`);
     await logger.error(
       "OLLAMA_UNAVAILABLE",
-      ollama.detail,
+      ollama.error.message,
       "cannot start the run",
       "fix Ollama / pull the model",
     );
     return 1;
   }
-  console.log(ollama.detail);
+  console.log(ollama.value.detail);
 
   // Create the workspace up front so test-runner / run_command spawns have a
   // valid cwd even before the model writes its first file.
@@ -89,6 +92,9 @@ async function main(): Promise<number> {
     lastTestResult: null,
     lastGoodSnapshot: null,
     scoreProgression: [],
+    selfTests: [],
+    testCommand: args.testCmd,
+    testSource: "none",
     dryRun: args.dryRun,
   };
 

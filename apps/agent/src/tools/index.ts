@@ -65,11 +65,17 @@ export function createTools(ctx: ToolContext): AnyTool[] {
         path: z.string().describe("Path relative to the workspace root"),
       }),
       async execute({ path }) {
-        if (!(await workspace.fileExists(path))) {
+        const exists = await workspace.fileExists(path);
+        if (exists.isErr()) return { content: exists.error.message, isError: true };
+        if (!exists.value) {
           return { content: `File not found: ${path}`, isError: true };
         }
         const raw = await workspace.readFile(path);
-        const t = truncateHead(raw, { maxLines: FILE_READ_MAX_LINES, maxBytes: FILE_READ_MAX_BYTES });
+        if (raw.isErr()) return { content: raw.error.message, isError: true };
+        const t = truncateHead(raw.value, {
+          maxLines: FILE_READ_MAX_LINES,
+          maxBytes: FILE_READ_MAX_BYTES,
+        });
         return { content: t.content || "(empty file)", details: { path, bytes: t.totalBytes } };
       },
     }),
@@ -81,7 +87,8 @@ export function createTools(ctx: ToolContext): AnyTool[] {
         content: z.string().describe("Full content of the file"),
       }),
       async execute({ path, content }) {
-        await workspace.writeFile(path, content);
+        const written = await workspace.writeFile(path, content);
+        if (written.isErr()) return { content: written.error.message, isError: true };
         return { content: `Wrote ${content.length} characters to ${path}`, details: { path } };
       },
     }),
@@ -90,7 +97,9 @@ export function createTools(ctx: ToolContext): AnyTool[] {
       description: "List every file currently in the workspace.",
       parameters: z.object({}),
       async execute() {
-        const files = await workspace.listFiles();
+        const listed = await workspace.listFiles();
+        if (listed.isErr()) return { content: listed.error.message, isError: true };
+        const files = listed.value;
         return {
           content: files.length > 0 ? files.join("\n") : "(workspace is empty)",
           details: { count: files.length },

@@ -2,7 +2,14 @@
 
 import { z } from "zod";
 
-export type Phase = "PLANNING" | "IMPLEMENTING" | "TESTING" | "FIXING" | "DONE" | "FAILED";
+export type Phase =
+  | "PLANNING"
+  | "GENERATE_TESTS"
+  | "IMPLEMENTING"
+  | "TESTING"
+  | "FIXING"
+  | "DONE"
+  | "FAILED";
 
 export const PlanSchema = z.object({
   steps: z.array(z.string()).describe("Ordered implementation steps"),
@@ -31,6 +38,34 @@ export const ActionSchema = z.object({
   summary: z.string().optional().describe("What you accomplished — for finish_phase"),
 });
 export type Action = z.infer<typeof ActionSchema>;
+
+/**
+ * One spec-derived test case. The harness writes the input file in an isolated
+ * directory, runs the program with `args`, and checks the captured output.
+ * Expected values come from the SPECIFICATION, never from running the program.
+ *
+ * The schema is intentionally flat (no nested arrays of objects): Ollama's
+ * grammar-constrained decoding is far slower on nested schemas, so each test
+ * is generated as a single flat object.
+ */
+export const SelfTestSchema = z.object({
+  name: z.string().describe("Short label for this case"),
+  rule: z.string().describe("The specification requirement this case verifies"),
+  inputName: z
+    .string()
+    .describe('Filename for the input file; "" if the test needs no input file'),
+  inputContent: z.string().describe("Exact content of the input file"),
+  args: z.string().describe("Command-line arguments passed to the program"),
+  expectedStdout: z.string().optional().describe("Exact stdout the program must print"),
+  expectedExitCode: z.number().int().optional().describe("Exit code the program must return"),
+});
+export type SelfTest = z.infer<typeof SelfTestSchema>;
+
+/** A batch of spec-derived test cases — the GENERATE_TESTS phase output. */
+export const SelfTestSuiteSchema = z.object({
+  tests: z.array(SelfTestSchema).describe("The spec-derived test cases"),
+});
+export type SelfTestSuite = z.infer<typeof SelfTestSuiteSchema>;
 
 export interface TestResult {
   score: number;
@@ -61,5 +96,11 @@ export interface RunState {
   /** Workspace contents at the best score so far — the rollback target. */
   lastGoodSnapshot: Map<string, string> | null;
   scoreProgression: ScorePoint[];
+  /** Spec-derived test cases, generated once in the GENERATE_TESTS phase. */
+  selfTests: SelfTest[];
+  /** Official test command (from --test-cmd / AGENT_TEST_CMD); "" = auto-detect. */
+  testCommand: string;
+  /** Which test source produced the last result. */
+  testSource: "official" | "self" | "none";
   dryRun: boolean;
 }

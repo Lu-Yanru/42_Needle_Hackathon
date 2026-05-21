@@ -3,6 +3,8 @@
 // by hand; final_report.md is written once at the end of a run.
 
 import { join, resolve } from "node:path";
+import { Result } from "better-result";
+import { FileSystemError } from "./errors";
 
 function timestamp(): string {
   const d = new Date();
@@ -57,9 +59,14 @@ export class Logger {
 
   private async append(name: string, text: string): Promise<void> {
     const path = this.path(name);
-    const existing = await Bun.file(path)
-      .text()
-      .catch(() => "");
+    // A missing log file reads as empty — fire-and-forget, so failures here
+    // collapse to "" rather than rippling a Result into every caller.
+    const existing = (
+      await Result.tryPromise({
+        try: () => Bun.file(path).text(),
+        catch: (cause) => new FileSystemError({ operation: "read", path, cause }),
+      })
+    ).unwrapOr("");
     await Bun.write(path, `${existing}${text}\n`);
   }
 

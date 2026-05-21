@@ -1,7 +1,8 @@
 // Ollama /api/chat client. Native tool calling + structured (JSON-schema)
-// output, plus token-usage capture. chat() NEVER throws — failures are
-// encoded in the result.
+// output, plus token-usage capture. chat() never throws — failures are
+// returned as a Result.
 
+import { Result } from "better-result";
 import {
   KEEP_ALIVE,
   MODEL,
@@ -11,6 +12,7 @@ import {
   REQUEST_TIMEOUT_MS,
   TEMPERATURE,
 } from "./config";
+import { OllamaError } from "./errors";
 
 export interface ToolCall {
   function: { name: string; arguments: Record<string, unknown> };
@@ -46,7 +48,6 @@ export interface ChatResult {
   message: ChatMessage;
   doneReason: string;
   usage: Usage;
-  error?: string;
   durationMs: number;
 }
 
@@ -57,9 +58,7 @@ interface OllamaChatResponse {
   eval_count?: number;
 }
 
-const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-
-export async function chat(options: ChatOptions): Promise<ChatResult> {
+export async function chat(options: ChatOptions): Promise<Result<ChatResult, OllamaError>> {
   const started = Date.now();
   const body: Record<string, unknown> = {
     model: options.model ?? MODEL,
@@ -90,12 +89,12 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
       const data = (await res.json()) as OllamaChatResponse;
       const inputTokens = data.prompt_eval_count ?? 0;
       const outputTokens = data.eval_count ?? 0;
-      return {
+      return Result.ok({
         message: data.message ?? { role: "assistant", content: "" },
         doneReason: data.done_reason ?? "stop",
         usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
         durationMs: Date.now() - started,
-      };
+      });
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -103,33 +102,35 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
     }
   }
 
-  return {
-    message: { role: "assistant", content: "" },
-    doneReason: "error",
-    usage: NO_USAGE,
-    error: lastError || "unknown Ollama error",
-    durationMs: Date.now() - started,
-  };
+  return Result.err(new OllamaError({ message: lastError || "unknown Ollama error" }));
 }
 
 /** Verify Ollama is reachable and the model is pulled. */
-export async function checkOllama(model = MODEL): Promise<{ ok: boolean; detail: string }> {
-  try {
-    const res = await fetch(`${OLLAMA_URL}/api/tags`);
-    if (!res.ok) return { ok: false, detail: `Ollama responded HTTP ${res.status}` };
-    const data = (await res.json()) as { models?: { name: string }[] };
-    const names = (data.models ?? []).map((m) => m.name);
-    if (!names.some((name) => name === model || name.startsWith(`${model}`))) {
-      return {
-        ok: false,
-        detail: `model "${model}" is not pulled. Run: ollama pull ${model}. Available: ${names.join(", ") || "none"}`,
-      };
-    }
-    return { ok: true, detail: `Ollama ready at ${OLLAMA_URL}, model ${model} available` };
-  } catch (err) {
-    return {
-      ok: false,
-      detail: `cannot reach Ollama at ${OLLAMA_URL}: ${err instanceof Error ? err.message : String(err)}`,
-    };
+export async function checkOllama(
+  model = MODEL,
+): Promise<Result<{ detail: string }, OllamaError>> {
+  const fetched = await Result.tryPromise({
+    try: () => fetch(`${OLLAMA_URL}/api/tags`),
+    catch: (cause) =>
+      new OllamaError({
+        message: `cannot reach Ollama at ${OLLAMA_URL}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        cause,
+      }),
+  });
+  if (fetched.isErr()) return fetched;
+
+  const res = fetched.value;
+  if (!res.ok) {
+    return Result.err(new OllamaError({ message: `Ollama responded HTTP ${res.status}` }));
   }
+  const data = (await res.json()) as { models?: { name: string }[] };
+  const names = (data.models ?? []).map((m) => m.name);
+  if (!names.some((name) => name === model || name.startsWith(`${model}`))) {
+    return Result.err(
+      new OllamaError({
+        message: `model "${model}" is not pulled. Run: ollama pull ${model}. Available: ${names.join(", ") || "none"}`,
+      }),
+    );
+  }
+  return Result.ok({ detail: `Ollama ready at ${OLLAMA_URL}, model ${model} available` });
 }

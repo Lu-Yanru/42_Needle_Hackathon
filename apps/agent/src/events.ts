@@ -6,6 +6,8 @@
 //   state.json — overwritten each iteration (current-status snapshot)
 
 import { join, resolve } from "node:path";
+import { Result } from "better-result";
+import { FileSystemError } from "./errors";
 import type { Usage } from "./ollama";
 import type { Phase, RunState, ScorePoint } from "./state";
 
@@ -51,9 +53,14 @@ export class EventLog {
   static async create(dir = "agent_logs"): Promise<EventLog> {
     const log = new EventLog(resolve(dir));
     // Continue run.jsonl across restarts (a restart is a logged intervention).
-    const existing = await Bun.file(log.path("run.jsonl"))
-      .text()
-      .catch(() => "");
+    // A missing file reads as empty — failures collapse to "".
+    const runPath = log.path("run.jsonl");
+    const existing = (
+      await Result.tryPromise({
+        try: () => Bun.file(runPath).text(),
+        catch: (cause) => new FileSystemError({ operation: "read", path: runPath, cause }),
+      })
+    ).unwrapOr("");
     log.seq = existing.trim() ? existing.trim().split("\n").length : 0;
     return log;
   }
@@ -66,9 +73,13 @@ export class EventLog {
   async emit(type: string, data: Record<string, unknown> = {}): Promise<void> {
     const event: RunEvent = { seq: this.seq++, ts: new Date().toISOString(), type, ...data };
     const file = this.path("run.jsonl");
-    const existing = await Bun.file(file)
-      .text()
-      .catch(() => "");
+    // A missing file reads as empty — failures collapse to "".
+    const existing = (
+      await Result.tryPromise({
+        try: () => Bun.file(file).text(),
+        catch: (cause) => new FileSystemError({ operation: "read", path: file, cause }),
+      })
+    ).unwrapOr("");
     await Bun.write(file, `${existing}${JSON.stringify(event)}\n`);
   }
 

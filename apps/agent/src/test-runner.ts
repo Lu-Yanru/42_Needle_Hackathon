@@ -7,6 +7,8 @@
 // human intervention, not a failure.
 
 import { join, resolve } from "node:path";
+import { Result } from "better-result";
+import { ProcessError } from "./errors";
 import type { TestResult } from "./state";
 import { truncateTail } from "./truncate";
 
@@ -14,6 +16,8 @@ export interface TestRunnerConfig {
   workspaceDir: string;
   runCommand: string;
   runnerPath?: string;
+  /** Configured official test command; "{program}" is replaced with runCommand. */
+  testCommand?: string;
 }
 
 interface SpawnResult {
@@ -21,7 +25,6 @@ interface SpawnResult {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
-  failed?: string;
 }
 
 function shellQuote(value: string): string {
@@ -32,40 +35,35 @@ async function spawnCapture(
   cmd: string,
   cwd: string,
   timeoutMs: number,
-): Promise<SpawnResult> {
-  let stdout = "";
-  let stderr = "";
-  let exitCode = -1;
-  let timedOut = false;
-  try {
-    const proc = Bun.spawn(["bash", "-lc", cmd], {
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      proc.kill();
-    }, timeoutMs);
-    try {
-      [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited.then((code) => code ?? -1),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (err) {
-    return {
-      stdout: "",
-      stderr: "",
-      exitCode: -1,
-      timedOut: false,
-      failed: err instanceof Error ? err.message : String(err),
-    };
-  }
-  return { stdout, stderr, exitCode, timedOut };
+): Promise<Result<SpawnResult, ProcessError>> {
+  return Result.tryPromise({
+    try: async () => {
+      let stdout = "";
+      let stderr = "";
+      let exitCode = -1;
+      let timedOut = false;
+      const proc = Bun.spawn(["bash", "-lc", cmd], {
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        proc.kill();
+      }, timeoutMs);
+      try {
+        [stdout, stderr, exitCode] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited.then((code) => code ?? -1),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      return { stdout, stderr, exitCode, timedOut } satisfies SpawnResult;
+    },
+    catch: (cause) => new ProcessError({ command: cmd, cause }),
+  });
 }
 
 async function findRunner(workspaceDir: string): Promise<string | null> {
@@ -104,30 +102,38 @@ export function parseTestOutput(output: string): TestResult {
 export async function runPublicTests(
   config: TestRunnerConfig,
 ): Promise<TestResult> {
-  const runner = config.runnerPath ?? (await findRunner(config.workspaceDir));
-  if (!runner) {
+  let cmd: string;
+  const configured = config.testCommand?.trim();
+  if (configured) {
+    cmd = configured.includes("{program}")
+      ? configured.replaceAll("{program}", config.runCommand)
+      : configured;
+  } else {
+    const runner = config.runnerPath ?? (await findRunner(config.workspaceDir));
+    if (!runner) {
+      return {
+        score: 0,
+        total: 0,
+        failing_categories: [],
+        raw: "",
+        error:
+          "no official test runner (set --test-cmd / AGENT_TEST_CMD, or place run_tests.py under secret_spec/)",
+      };
+    }
+    cmd = `python3 ${shellQuote(runner)} --program ${shellQuote(config.runCommand)} --suite public`;
+  }
+  const spawned = await spawnCapture(cmd, resolve(config.workspaceDir), 180_000);
+
+  if (spawned.isErr()) {
     return {
       score: 0,
       total: 0,
       failing_categories: [],
       raw: "",
-      error:
-        "test runner not found (expected secret_spec/test_runner/run_tests.py). Patch test-runner.ts once the real runner is released.",
+      error: `failed to run test runner: ${spawned.error.message}`,
     };
   }
-
-  const cmd = `python3 ${shellQuote(runner)} --program ${shellQuote(config.runCommand)} --suite public`;
-  const res = await spawnCapture(cmd, resolve(config.workspaceDir), 180_000);
-
-  if (res.failed) {
-    return {
-      score: 0,
-      total: 0,
-      failing_categories: [],
-      raw: "",
-      error: `failed to run test runner: ${res.failed}`,
-    };
-  }
+  const res = spawned.value;
   if (res.timedOut) {
     return {
       score: 0,
@@ -155,12 +161,13 @@ export async function smokeRun(
   workspaceDir: string,
   runCommand: string,
 ): Promise<string> {
-  const res = await spawnCapture(
+  const spawned = await spawnCapture(
     `${runCommand} </dev/null`,
     resolve(workspaceDir),
     15_000,
   );
-  if (res.failed) return `could not run the program: ${res.failed}`;
+  if (spawned.isErr()) return `could not run the program: ${spawned.error.message}`;
+  const res = spawned.value;
   if (res.timedOut)
     return "program timed out after 15s (it may be waiting on input)";
   const body = [

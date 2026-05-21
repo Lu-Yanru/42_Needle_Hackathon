@@ -11,14 +11,26 @@ import { z } from "zod";
 import { MAX_INNER_STEPS, MODEL, NO_IMPROVEMENT_LIMIT } from "./config";
 import type { EventLog } from "./events";
 import type { Logger } from "./logger";
-import { type ChatMessage, chat } from "./ollama";
+import { type ChatMessage, chat, type Usage } from "./ollama";
 import * as prompts from "./prompts";
-import { type Action, ActionSchema, PlanSchema, type RunState } from "./state";
+import {
+  type Action,
+  ActionSchema,
+  PlanSchema,
+  type RunState,
+  type SelfTest,
+  SelfTestSchema,
+  type TestResult,
+} from "./state";
+import { programBaseCommand, runSelfTests } from "./self-tests";
 import { runPublicTests, smokeRun } from "./test-runner";
 import { createTools, FINISH_PHASE, type ToolContext } from "./tools/index";
 import type { AnyTool } from "./tools/types";
 import { truncateHead } from "./truncate";
 import { Workspace } from "./workspace";
+
+/** Zero token usage — recorded when a model call fails before producing output. */
+const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
 /** Best-effort JSON extraction (handles fenced or prose-wrapped output). */
 function safeJson(text: string): unknown {
@@ -62,11 +74,12 @@ function actionToToolArgs(action: Action): { name: string; args: Record<string, 
 }
 
 async function renderFiles(workspace: Workspace): Promise<string> {
-  const files = await workspace.listFiles();
+  const listed = await workspace.listFiles();
+  const files = listed.unwrapOr([]);
   if (files.length === 0) return "(workspace is empty)";
   const parts: string[] = [];
   for (const file of files.slice(0, 12)) {
-    const content = await workspace.readFile(file);
+    const content = (await workspace.readFile(file)).unwrapOr("");
     const t = truncateHead(content, { maxLines: 140, maxBytes: 6000 });
     parts.push(`### ${file}\n\`\`\`\n${t.content}\n\`\`\``);
   }
@@ -89,43 +102,143 @@ async function doPlanning(state: RunState, logger: Logger, events: EventLog): Pr
     ],
     format: z.toJSONSchema(PlanSchema),
   });
-  await events.modelCall("PLANNING", res.durationMs, res.usage, 0);
 
-  if (!res.error) {
-    const parsed = PlanSchema.safeParse(safeJson(res.message.content));
-    if (parsed.success) {
-      state.plan = parsed.data;
-      await logger.decision(
-        "plan accepted",
-        `run_command="${parsed.data.run_command}", ${parsed.data.steps.length} step(s)`,
-        "IMPLEMENTING",
-      );
-      await events.emit("plan", {
-        runCommand: parsed.data.run_command,
-        entrypoint: parsed.data.entrypoint,
-        steps: parsed.data.steps.length,
-      });
-      state.phase = "IMPLEMENTING";
-      return;
-    }
+  if (res.isErr()) {
+    await events.modelCall("PLANNING", 0, NO_USAGE, 0);
     state.planFailures++;
     await logger.error(
-      "PLAN_PARSE",
-      parsed.error.message.slice(0, 300),
-      "no usable plan",
+      "LLM_ERROR",
+      res.error.message,
+      "no plan produced",
       `retry (attempt ${state.planFailures})`,
     );
-    await events.errorEvent("PLAN_PARSE", parsed.error.message.slice(0, 200));
-  } else {
-    state.planFailures++;
-    await logger.error("LLM_ERROR", res.error, "no plan produced", `retry (attempt ${state.planFailures})`);
-    await events.errorEvent("LLM_ERROR", res.error);
+    await events.errorEvent("LLM_ERROR", res.error.message);
+    if (state.planFailures >= 3) {
+      await logger.error(
+        "PLANNING_FAILED",
+        "3 planning attempts failed",
+        "cannot proceed",
+        "aborting run",
+      );
+      state.phase = "FAILED";
+    }
+    return;
   }
+
+  const chatResult = res.value;
+  await events.modelCall("PLANNING", chatResult.durationMs, chatResult.usage, 0);
+  const parsed = PlanSchema.safeParse(safeJson(chatResult.message.content));
+  if (parsed.success) {
+    state.plan = parsed.data;
+    await logger.decision(
+      "plan accepted",
+      `run_command="${parsed.data.run_command}", ${parsed.data.steps.length} step(s)`,
+      "GENERATE_TESTS",
+    );
+    await events.emit("plan", {
+      runCommand: parsed.data.run_command,
+      entrypoint: parsed.data.entrypoint,
+      steps: parsed.data.steps.length,
+    });
+    state.phase = "GENERATE_TESTS";
+    return;
+  }
+
+  state.planFailures++;
+  await logger.error(
+    "PLAN_PARSE",
+    parsed.error.message.slice(0, 300),
+    "no usable plan",
+    `retry (attempt ${state.planFailures})`,
+  );
+  await events.errorEvent("PLAN_PARSE", parsed.error.message.slice(0, 200));
 
   if (state.planFailures >= 3) {
     await logger.error("PLANNING_FAILED", "3 planning attempts failed", "cannot proceed", "aborting run");
     state.phase = "FAILED";
   }
+}
+
+async function doGenerateTests(
+  state: RunState,
+  logger: Logger,
+  events: EventLog,
+): Promise<void> {
+  await events.emit("phase_start", { phase: "GENERATE_TESTS", iteration: state.iteration });
+  if (!state.plan) {
+    state.phase = "IMPLEMENTING";
+    return;
+  }
+
+  // Generate one flat test per call. Ollama's constrained decoding is far
+  // slower on nested schemas, so a per-test loop stays fast and reliable
+  // where a single whole-suite call times out.
+  const target = 6;
+  const testFormat = z.toJSONSchema(SelfTestSchema);
+  const tests: SelfTest[] = [];
+
+  for (let i = 0; i < target; i++) {
+    const prompt = prompts.generateTestPrompt(state.spec, state.plan, tests);
+    if (i === 0) await logger.prompt("GENERATE_TESTS", prompt);
+
+    const res = await chat({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You write one test case for a program from its specification. Every expected value must be derived from the SPECIFICATION, never by running a program. Respond only with the requested JSON object.",
+        },
+        { role: "user", content: prompt },
+      ],
+      format: testFormat,
+    });
+
+    if (res.isErr()) {
+      await events.modelCall("GENERATE_TESTS", 0, NO_USAGE, 0);
+      await logger.error(
+        "LLM_ERROR",
+        res.error.message,
+        `self-test ${i + 1}/${target}`,
+        "stopping self-test generation",
+      );
+      await events.errorEvent("LLM_ERROR", res.error.message);
+      break;
+    }
+
+    const chatResult = res.value;
+    await events.modelCall("GENERATE_TESTS", chatResult.durationMs, chatResult.usage, 0);
+    const parsed = SelfTestSchema.safeParse(safeJson(chatResult.message.content));
+    if (parsed.success) {
+      tests.push(parsed.data);
+    } else {
+      await logger.error(
+        "SELFTEST_PARSE",
+        parsed.error.message.slice(0, 200),
+        `self-test ${i + 1}/${target}`,
+        "skipping this case",
+      );
+      await events.errorEvent("SELFTEST_PARSE", parsed.error.message.slice(0, 150));
+    }
+  }
+
+  state.selfTests = tests;
+  if (tests.length > 0) {
+    await logger.decision(
+      "self-tests generated",
+      `${tests.length} spec-derived case(s): ${tests.map((t) => t.name).join(", ")}`,
+      "IMPLEMENTING",
+    );
+    await events.emit("self_tests", { count: tests.length });
+  } else {
+    await logger.error(
+      "NO_SELFTESTS",
+      "self-test generation produced 0 cases",
+      "no fallback feedback signal",
+      "continuing — the official runner may still be available",
+    );
+    await events.errorEvent("NO_SELFTESTS", "0 self-tests generated");
+  }
+  state.phase = "IMPLEMENTING";
 }
 
 async function doModelPhase(
@@ -168,14 +281,20 @@ async function doModelPhase(
   let finished = false;
   for (let step = 0; step < MAX_INNER_STEPS && !finished; step++) {
     const res = await chat({ messages, format: actionFormat });
-    if (res.error) {
-      await logger.error("LLM_ERROR", res.error, `${state.phase} step ${step}`, "ending phase, will test");
-      await events.errorEvent("LLM_ERROR", res.error);
+    if (res.isErr()) {
+      await logger.error(
+        "LLM_ERROR",
+        res.error.message,
+        `${state.phase} step ${step}`,
+        "ending phase, will test",
+      );
+      await events.errorEvent("LLM_ERROR", res.error.message);
       break;
     }
-    await events.modelCall(state.phase, res.durationMs, res.usage, 1);
+    const chatResult = res.value;
+    await events.modelCall(state.phase, chatResult.durationMs, chatResult.usage, 1);
 
-    const parsed = ActionSchema.safeParse(safeJson(res.message.content));
+    const parsed = ActionSchema.safeParse(safeJson(chatResult.message.content));
     if (!parsed.success) {
       await logger.error(
         "ACTION_PARSE",
@@ -184,7 +303,7 @@ async function doModelPhase(
         "asking model to retry",
       );
       await events.errorEvent("ACTION_PARSE", parsed.error.message.slice(0, 150));
-      messages.push({ role: "assistant", content: res.message.content });
+      messages.push({ role: "assistant", content: chatResult.message.content });
       messages.push({
         role: "user",
         content: "Your response was not a valid action JSON object. Respond with exactly one action object.",
@@ -193,7 +312,7 @@ async function doModelPhase(
     }
 
     const action = parsed.data;
-    messages.push({ role: "assistant", content: res.message.content });
+    messages.push({ role: "assistant", content: chatResult.message.content });
     await logger.decision(`${state.phase} action: ${action.tool}`, action.reasoning);
 
     const { name, args } = actionToToolArgs(action);
@@ -226,21 +345,43 @@ async function doTesting(
 
   const runCommand = state.plan?.run_command ?? "";
   if (!runCommand) {
-    await logger.error("NO_RUN_COMMAND", "plan has no run_command", "cannot test", "moving to FIXING");
+    await logger.error("NO_RUN_COMMAND", "plan has no run_command", "cannot test", "aborting run");
     await events.errorEvent("NO_RUN_COMMAND", "plan has no run_command");
-    state.phase = "FIXING";
+    state.phase = "FAILED";
     return;
   }
 
-  const result = await runPublicTests({ workspaceDir: workspace.root, runCommand });
+  // Primary feedback: the official runner. Fall back to spec-derived
+  // self-tests when no official runner is configured or found.
+  const official = await runPublicTests({
+    workspaceDir: workspace.root,
+    runCommand,
+    testCommand: state.testCommand,
+  });
+
+  let result: TestResult;
+  if (!(official.error && official.total === 0)) {
+    result = official;
+    state.testSource = "official";
+  } else if (state.selfTests.length > 0) {
+    result = await runSelfTests({
+      tests: state.selfTests,
+      programFiles: (await workspace.snapshot()).unwrapOr(new Map()),
+      baseCommand: programBaseCommand(runCommand),
+    });
+    state.testSource = "self";
+  } else {
+    await logger.error(
+      "NO_TEST_SOURCE",
+      official.error ?? "no official runner and no self-tests",
+      "cannot evaluate the program",
+      "aborting run",
+    );
+    await events.errorEvent("NO_TEST_SOURCE", official.error ?? "no test source");
+    state.phase = "FAILED";
+    return;
+  }
   state.lastTestResult = result;
-
-  if (result.error && result.total === 0) {
-    await logger.error("TEST_RUNNER", result.error, "no score this iteration", "moving to FIXING");
-    await events.errorEvent("TEST_RUNNER", result.error);
-    state.phase = "FIXING";
-    return;
-  }
 
   const fullPass = result.total > 0 && result.score === result.total;
 
@@ -251,11 +392,17 @@ async function doTesting(
     result.raw += `\n\n--- PROGRAM SMOKE RUN (${runCommand}, no stdin) ---\n${smoke}`;
   }
 
-  await logger.testRun(result.score, result.total, result.failing_categories, runCommand);
+  await logger.testRun(
+    result.score,
+    result.total,
+    result.failing_categories,
+    state.testSource === "self" ? "spec-derived self-tests" : "official public tests",
+  );
   await events.emit("test_run", {
     score: result.score,
     total: result.total,
     failing: result.failing_categories,
+    source: state.testSource,
   });
   state.scoreProgression.push({
     ts: new Date().toISOString(),
@@ -274,7 +421,7 @@ async function doTesting(
   if (result.score > state.bestScore) {
     state.bestScore = result.score;
     state.noImprovementStreak = 0;
-    state.lastGoodSnapshot = await workspace.snapshot();
+    state.lastGoodSnapshot = (await workspace.snapshot()).unwrapOr(null);
     await logger.decision("score improved", `new best ${result.score}/${result.total}`, "FIXING");
     await events.emit("score_improved", {
       score: result.score,
@@ -284,7 +431,16 @@ async function doTesting(
   } else {
     state.noImprovementStreak++;
     if (result.score < state.bestScore && state.lastGoodSnapshot) {
-      await workspace.restore(state.lastGoodSnapshot);
+      const restored = await workspace.restore(state.lastGoodSnapshot);
+      if (restored.isErr()) {
+        await logger.error(
+          "ROLLBACK_FAILED",
+          restored.error.message,
+          "could not restore last-good workspace",
+          "continuing with current files",
+        );
+        await events.errorEvent("ROLLBACK_FAILED", restored.error.message);
+      }
       await logger.decision(
         "rolled back regression",
         `score ${result.score} < best ${state.bestScore}; restored last-good workspace`,
@@ -322,6 +478,8 @@ export async function runAgent(state: RunState, logger: Logger, events: EventLog
   ) {
     if (state.phase === "PLANNING") {
       await doPlanning(state, logger, events);
+    } else if (state.phase === "GENERATE_TESTS") {
+      await doGenerateTests(state, logger, events);
     } else if (state.phase === "IMPLEMENTING" || state.phase === "FIXING") {
       await doModelPhase(state, logger, events, systemPrompt, tools, workspace);
     } else if (state.phase === "TESTING") {
