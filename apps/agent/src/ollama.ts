@@ -125,6 +125,8 @@ export async function checkOllama(
         cause,
       }),
   });
+  if (fetched.isErr()) return fetched;
+
   const res = fetched.value;
   if (!res.ok) {
     return Result.err(
