@@ -1,6 +1,6 @@
 // System and per-phase prompt templates.
 
-import type { Plan, TestResult } from "./state";
+import type { Plan, SelfTest, TestResult } from "./state";
 import type { AnyTool } from "./tools/types";
 
 export function systemPrompt(tools: AnyTool[]): string {
@@ -86,4 +86,32 @@ CURRENT WORKSPACE FILES:
 ${files}
 
 First, in one short paragraph, analyse WHY this keeps failing. Then take a genuinely DIFFERENT approach than your previous attempts. Use read_file then write_file, and call finish_phase when ready to re-test.`;
+}
+
+export function generateTestPrompt(spec: string, plan: Plan, existing: SelfTest[]): string {
+  const covered =
+    existing.length > 0
+      ? `\nAlready covered — pick a DIFFERENT case than these:\n${existing
+          .map((t) => `- ${t.name}: ${t.rule}`)
+          .join("\n")}\n`
+      : "";
+  return `Read this specification and write ONE test case for a program implementing it.
+
+SPECIFICATION:
+---
+${spec}
+---
+
+The finished program is run as: ${plan.run_command}
+${covered}
+Respond with ONE test case as a JSON object:
+- name: a short label;
+- rule: the single specification requirement this case checks;
+- inputName + inputContent: the input file to create (set inputName to "" if the test needs no input file, e.g. a missing-file test);
+- args: the command-line arguments to pass to the program;
+- expectedStdout and/or expectedExitCode: the EXACT expected result.
+
+Work out the expected result by reasoning about the SPECIFICATION yourself —
+never by running a program. Across calls, cover the normal case, the edge
+cases, and the error cases.`;
 }
