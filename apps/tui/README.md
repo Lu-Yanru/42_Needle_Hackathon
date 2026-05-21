@@ -4,22 +4,23 @@ An [Ink](https://github.com/vadimdemedes/ink) (React-in-the-terminal) live
 monitor for the Needle agent. Part of the [needle-agent monorepo](../../README.md).
 
 It is a **read-only viewer**: it polls the `run.jsonl` + `state.json` files the
-agent writes under `agent_logs/` and renders a live dashboard. It never writes
-anything and never imports agent runtime code — a crash here cannot affect the
-agent or the test score.
+agent writes under `<workspace>/.needle-agent/` and renders a live dashboard. It
+never writes anything and never imports agent runtime code — a crash here cannot
+affect the agent or the test score.
 
 ## Run
 
 Start the agent in one terminal, then in another:
 
 ```bash
-bun run --filter=tui start -- --log-dir <path-to>/agent_logs
+bun run --filter=tui start -- --log-dir <workspace>/.needle-agent
 ```
 
-Or from the repo root: `bun run tui`. Press `q` to quit.
+Or from the repo root: `bun run tui` (defaults to `solution/.needle-agent`).
+Press `q` to quit.
 
 If the agent has not started yet, the TUI shows "waiting for the agent…" and
-picks up the run as soon as `agent_logs/state.json` appears.
+picks up the run as soon as `.needle-agent/state.json` appears.
 
 ## Layout
 

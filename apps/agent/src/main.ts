@@ -1,9 +1,12 @@
 // CLI entrypoint for the agent harness.
 //
 //   bun run start --spec <path/to/SPEC.md> [--workspace ./solution]
-//                 [--dry-run] [--max-iter N] [--log-dir agent_logs]
+//                 [--dry-run] [--max-iter N] [--log-dir <dir>] [--test-cmd "<cmd>"]
+//
+// The agent's run data (logs, run.jsonl, state.json, agent_manifest.json) is
+// written to `<workspace>/.needle-agent/` unless --log-dir overrides it.
 
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { MAX_ITERATIONS, MODEL, TEST_COMMAND } from "./config";
 import { EventLog } from "./events";
 import { Logger } from "./logger";
@@ -27,7 +30,7 @@ function parseArgs(argv: string[]): Args {
     workspace: "./solution",
     dryRun: false,
     maxIter: MAX_ITERATIONS,
-    logDir: "agent_logs",
+    logDir: "", // empty = default to <workspace>/.needle-agent
     testCmd: TEST_COMMAND,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -46,7 +49,7 @@ async function main(): Promise<number> {
   const args = parseArgs(Bun.argv.slice(2));
   if (!args.spec) {
     console.error(
-      'usage: bun run start --spec <path/to/SPEC.md> [--workspace ./solution] [--dry-run] [--max-iter N] [--log-dir agent_logs] [--test-cmd "<cmd>"]',
+      'usage: bun run start --spec <path/to/SPEC.md> [--workspace ./solution] [--dry-run] [--max-iter N] [--log-dir <dir>] [--test-cmd "<cmd>"]',
     );
     return 2;
   }
@@ -57,8 +60,15 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const logger = await Logger.create(args.logDir);
-  const events = await EventLog.create(args.logDir);
+  // Create the workspace up front so test-runner / run_command spawns have a
+  // valid cwd. The agent's run data lives in .needle-agent/ at the workspace
+  // root (override with --log-dir).
+  const workspaceDir = resolve(args.workspace);
+  await Bun.$`mkdir -p ${workspaceDir}`.quiet().nothrow();
+  const outputDir = args.logDir ? resolve(args.logDir) : join(workspaceDir, ".needle-agent");
+
+  const logger = await Logger.create(outputDir);
+  const events = await EventLog.create(outputDir);
 
   const ollama = await checkOllama();
   if (ollama.isErr()) {
@@ -72,11 +82,6 @@ async function main(): Promise<number> {
     return 1;
   }
   console.log(ollama.value.detail);
-
-  // Create the workspace up front so test-runner / run_command spawns have a
-  // valid cwd even before the model writes its first file.
-  const workspaceDir = resolve(args.workspace);
-  await Bun.$`mkdir -p ${workspaceDir}`.quiet().nothrow();
 
   const state: RunState = {
     specPath: args.spec,
@@ -98,7 +103,9 @@ async function main(): Promise<number> {
     dryRun: args.dryRun,
   };
 
-  console.log(`agent: model=${MODEL} workspace=${workspaceDir} spec=${args.spec}`);
+  console.log(
+    `agent: model=${MODEL} workspace=${workspaceDir} output=${outputDir} spec=${args.spec}`,
+  );
 
   try {
     await runAgent(state, logger, events);
@@ -111,7 +118,7 @@ async function main(): Promise<number> {
   }
 
   await logger.writeFinalReport(buildFinalReport(state));
-  await writeManifest();
+  await writeManifest(join(outputDir, "agent_manifest.json"));
 
   const tr = state.lastTestResult;
   console.log(

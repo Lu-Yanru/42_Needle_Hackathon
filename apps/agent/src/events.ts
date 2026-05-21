@@ -1,5 +1,5 @@
 // Structured event stream for the dashboard — written as plain files under
-// agent_logs/. The agent only ever writes these; the dashboard reads them.
+// .needle-agent/. The agent only ever writes these; the dashboard reads them.
 // The agent never depends on the dashboard.
 //
 //   run.jsonl  — append-only, one JSON event per line (the run timeline)
@@ -50,7 +50,7 @@ export class EventLog {
     this.dir = dir;
   }
 
-  static async create(dir = "agent_logs"): Promise<EventLog> {
+  static async create(dir = ".needle-agent"): Promise<EventLog> {
     const log = new EventLog(resolve(dir));
     // Continue run.jsonl across restarts (a restart is a logged intervention).
     // A missing file reads as empty — failures collapse to "".

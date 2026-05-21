@@ -1,0 +1,23 @@
+{
+  "updatedAt": "2026-05-21T15:41:41.565Z",
+  "phase": "FIXING",
+  "iteration": 4,
+  "maxIterations": 40,
+  "bestScore": 3,
+  "noImprovementStreak": 0,
+  "lastScore": 3,
+  "lastTotal": 6,
+  "scoreProgression": [
+    {
+      "ts": "2026-05-21T15:41:41.557Z",
+      "score": 3,
+      "total": 6
+    }
+  ],
+  "totalInputTokens": 3693,
+  "totalOutputTokens": 779,
+  "modelCalls": 8,
+  "toolCalls": 1,
+  "errors": 0,
+  "done": false
+}

@@ -1,5 +1,5 @@
-// Structured, timestamped logging into the 7 files judges require under
-// agent_logs/. human_interventions.log is created with a header and filled
+// Structured, timestamped logging into the 7 required log files under
+// .needle-agent/. human_interventions.log is created with a header and filled
 // by hand; final_report.md is written once at the end of a run.
 
 import { join, resolve } from "node:path";
@@ -34,7 +34,7 @@ export class Logger {
     this.dir = dir;
   }
 
-  static async create(dir = "agent_logs"): Promise<Logger> {
+  static async create(dir = ".needle-agent"): Promise<Logger> {
     const logger = new Logger(resolve(dir));
     await logger.init();
     return logger;
@@ -45,7 +45,7 @@ export class Logger {
   }
 
   private async init(): Promise<void> {
-    // Bun.write creates the agent_logs directory on first write.
+    // Bun.write creates the .needle-agent directory on first write.
     for (const [name, header] of Object.entries(HEADERS)) {
       if (!(await Bun.file(this.path(name)).exists())) {
         await Bun.write(this.path(name), header);
