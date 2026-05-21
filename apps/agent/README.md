@@ -49,8 +49,8 @@ Flags: `--dry-run` (one phase, then stop), `--max-iter N`, `--log-dir <dir>`.
 
 ## Output
 
-All run data is written to `<workspace>/.needle-agent/` (override with
-`--log-dir`):
+All run data is written to `.needle-agent/` at the monorepo root (override
+with `--log-dir`):
 
 - the 7 judge-facing text logs: `prompts.log`, `decisions.log`, `commands.log`,
   `test_runs.log`, `errors.log`, `human_interventions.log`, `final_report.md`

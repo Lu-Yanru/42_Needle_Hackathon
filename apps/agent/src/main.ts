@@ -4,9 +4,10 @@
 //                 [--dry-run] [--max-iter N] [--log-dir <dir>] [--test-cmd "<cmd>"]
 //
 // The agent's run data (logs, run.jsonl, state.json, agent_manifest.json) is
-// written to `<workspace>/.needle-agent/` unless --log-dir overrides it.
+// written to `<monorepo-root>/.needle-agent/` unless --log-dir overrides it.
 
-import { join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { MAX_ITERATIONS, MODEL, TEST_COMMAND } from "./config";
 import { EventLog } from "./events";
 import { Logger } from "./logger";
@@ -14,6 +15,18 @@ import { runAgent } from "./loop";
 import { checkOllama } from "./ollama";
 import type { RunState } from "./state";
 import { buildFinalReport, writeManifest } from "./submission";
+
+/** Walk up from this file to the monorepo root (the directory with turbo.json). */
+function findRepoRoot(): string {
+  let dir = import.meta.dir;
+  for (let i = 0; i < 12; i++) {
+    if (existsSync(join(dir, "turbo.json"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return resolve(import.meta.dir, "../../.."); // fallback: apps/<name>/src layout
+}
 
 interface Args {
   spec: string;
@@ -30,7 +43,7 @@ function parseArgs(argv: string[]): Args {
     workspace: "./solution",
     dryRun: false,
     maxIter: MAX_ITERATIONS,
-    logDir: "", // empty = default to <workspace>/.needle-agent
+    logDir: "", // empty = default to <monorepo-root>/.needle-agent
     testCmd: TEST_COMMAND,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -61,11 +74,11 @@ async function main(): Promise<number> {
   }
 
   // Create the workspace up front so test-runner / run_command spawns have a
-  // valid cwd. The agent's run data lives in .needle-agent/ at the workspace
-  // root (override with --log-dir).
+  // valid cwd. The agent's run data lives in .needle-agent/ at the monorepo
+  // root — kept separate from the workspace (override with --log-dir).
   const workspaceDir = resolve(args.workspace);
   await Bun.$`mkdir -p ${workspaceDir}`.quiet().nothrow();
-  const outputDir = args.logDir ? resolve(args.logDir) : join(workspaceDir, ".needle-agent");
+  const outputDir = args.logDir ? resolve(args.logDir) : join(findRepoRoot(), ".needle-agent");
 
   const logger = await Logger.create(outputDir);
   const events = await EventLog.create(outputDir);
