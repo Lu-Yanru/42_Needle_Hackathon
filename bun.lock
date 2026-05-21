@@ -19,6 +19,14 @@
     },
     "apps/agent": {
       "name": "agent",
+      "dependencies": {
+        "zod": "catalog:",
+      },
+      "devDependencies": {
+        "@needle-agent/config": "workspace:*",
+        "@types/bun": "catalog:",
+        "typescript": "catalog:",
+      },
     },
     "apps/server": {
       "name": "server",

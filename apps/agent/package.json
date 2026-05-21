@@ -1,7 +1,18 @@
 {
   "name": "agent",
+  "type": "module",
   "private": true,
+  "main": "src/main.ts",
   "scripts": {
-    "test": "uv run python tests/test_logger.py && uv run python tests/test_tools.py"
+    "start": "bun run src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@needle-agent/config": "workspace:*",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:"
   }
 }

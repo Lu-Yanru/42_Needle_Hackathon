@@ -1,0 +1,111 @@
+// CLI entrypoint for the agent harness.
+//
+//   bun run start --spec <path/to/SPEC.md> [--workspace ./solution]
+//                 [--dry-run] [--max-iter N] [--log-dir agent_logs]
+
+import { resolve } from "node:path";
+import { MAX_ITERATIONS, MODEL } from "./config";
+import { Logger } from "./logger";
+import { runAgent } from "./loop";
+import { checkOllama } from "./ollama";
+import type { RunState } from "./state";
+import { buildFinalReport, writeManifest } from "./submission";
+
+interface Args {
+  spec: string;
+  workspace: string;
+  dryRun: boolean;
+  maxIter: number;
+  logDir: string;
+}
+
+function parseArgs(argv: string[]): Args {
+  const args: Args = {
+    spec: "",
+    workspace: "./solution",
+    dryRun: false,
+    maxIter: MAX_ITERATIONS,
+    logDir: "agent_logs",
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === "--spec") args.spec = argv[++i] ?? "";
+    else if (flag === "--workspace") args.workspace = argv[++i] ?? args.workspace;
+    else if (flag === "--dry-run") args.dryRun = true;
+    else if (flag === "--max-iter") args.maxIter = Number(argv[++i] ?? args.maxIter);
+    else if (flag === "--log-dir") args.logDir = argv[++i] ?? args.logDir;
+  }
+  return args;
+}
+
+async function main(): Promise<number> {
+  const args = parseArgs(Bun.argv.slice(2));
+  if (!args.spec) {
+    console.error(
+      "usage: bun run start --spec <path/to/SPEC.md> [--workspace ./solution] [--dry-run] [--max-iter N] [--log-dir agent_logs]",
+    );
+    return 2;
+  }
+
+  const specFile = Bun.file(resolve(args.spec));
+  if (!(await specFile.exists())) {
+    console.error(`spec file not found: ${args.spec}`);
+    return 2;
+  }
+
+  const logger = await Logger.create(args.logDir);
+
+  const ollama = await checkOllama();
+  if (!ollama.ok) {
+    console.error(`Ollama not ready: ${ollama.detail}`);
+    await logger.error(
+      "OLLAMA_UNAVAILABLE",
+      ollama.detail,
+      "cannot start the run",
+      "fix Ollama / pull the model",
+    );
+    return 1;
+  }
+  console.log(ollama.detail);
+
+  // The workspace directory is created lazily by the first Bun.write.
+  const workspaceDir = resolve(args.workspace);
+
+  const state: RunState = {
+    specPath: args.spec,
+    spec: await specFile.text(),
+    workspaceDir,
+    phase: "PLANNING",
+    plan: null,
+    iteration: 0,
+    maxIterations: args.maxIter,
+    bestScore: -1,
+    noImprovementStreak: 0,
+    planFailures: 0,
+    lastTestResult: null,
+    lastGoodSnapshot: null,
+    scoreProgression: [],
+    dryRun: args.dryRun,
+  };
+
+  console.log(`agent: model=${MODEL} workspace=${workspaceDir} spec=${args.spec}`);
+
+  try {
+    await runAgent(state, logger);
+  } catch (err) {
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    await logger.error("FATAL", detail, "run aborted", "see errors.log");
+    state.phase = "FAILED";
+  }
+
+  await logger.writeFinalReport(buildFinalReport(state));
+  await writeManifest();
+
+  const tr = state.lastTestResult;
+  console.log(
+    `done: phase=${state.phase} score=${tr ? `${tr.score}/${tr.total}` : "n/a"} iterations=${state.iteration}`,
+  );
+  return state.phase === "DONE" ? 0 : 1;
+}
+
+process.exit(await main());
