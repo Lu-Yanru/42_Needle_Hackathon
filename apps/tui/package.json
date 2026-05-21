@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "better-result": "catalog:",
     "ink": "^5.0.1",
     "react": "^18.3.1"
   },
