@@ -5,9 +5,12 @@
   "main": "src/main.ts",
   "scripts": {
     "start": "bun run src/main.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@t3-oss/env-core": "^0.13.1",
+    "better-result": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

@@ -1,11 +1,11 @@
 // Submission artifacts: agent_manifest.json and the final report body.
 
-import { MODEL } from "./config";
+import { MODEL, TEAM_NAME } from "./config";
 import type { RunState } from "./state";
 
 export async function writeManifest(path = "agent_manifest.json"): Promise<void> {
   const manifest = {
-    team_name: process.env.AGENT_TEAM_NAME ?? "TODO: set AGENT_TEAM_NAME",
+    team_name: TEAM_NAME,
     primary_model: MODEL,
     provider: "Ollama",
     runtime_or_tool: "custom TypeScript agent harness (Bun)",
