@@ -1,0 +1,23 @@
+{
+  "name": "@needle-agent/auth",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    },
+    "./*": {
+      "default": "./src/*.ts"
+    }
+  },
+  "scripts": {},
+  "dependencies": {
+    "@needle-agent/db": "workspace:*",
+    "@needle-agent/env": "workspace:*",
+    "better-auth": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@needle-agent/config": "workspace:*",
+    "typescript": "catalog:"
+  }
+}

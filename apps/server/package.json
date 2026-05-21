@@ -1,0 +1,31 @@
+{
+  "name": "server",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -b",
+    "compile": "bun build --compile --minify --sourcemap --bytecode ./src/index.ts --outfile server",
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run dist/index.mjs"
+  },
+  "dependencies": {
+    "@needle-agent/api": "workspace:*",
+    "@needle-agent/auth": "workspace:*",
+    "@needle-agent/db": "workspace:*",
+    "@needle-agent/env": "workspace:*",
+    "@orpc/openapi": "catalog:",
+    "@orpc/server": "catalog:",
+    "@orpc/zod": "catalog:",
+    "better-auth": "catalog:",
+    "evlog": "^2.14.1",
+    "hono": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@needle-agent/config": "workspace:*",
+    "@types/bun": "catalog:",
+    "tsdown": "^0.22.0",
+    "typescript": "catalog:"
+  }
+}

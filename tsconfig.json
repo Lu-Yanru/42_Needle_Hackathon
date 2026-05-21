@@ -1,0 +1,3 @@
+{
+  "extends": "@needle-agent/config/tsconfig.base.json"
+}

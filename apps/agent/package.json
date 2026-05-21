@@ -1,0 +1,7 @@
+{
+  "name": "agent",
+  "private": true,
+  "scripts": {
+    "test": "uv run python tests/test_logger.py && uv run python tests/test_tools.py"
+  }
+}
