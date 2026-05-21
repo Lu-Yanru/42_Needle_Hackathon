@@ -1,33 +1,38 @@
 # Hackathon Agent Implementation Plan
 
-**Constraint**: Local/free models only after 20:00. Ollama recommended.  
-**Deadline**: 19:45 checkpoint → 20:00 reveal → Friday 12:00 submission  
+**Constraint**: Local/free models only after 20:00. Ollama recommended.\
+**Deadline**: 19:45 checkpoint → 20:00 reveal → Friday 12:00 submission\
 **Success criteria**: Agent can read spec → write code → run tests → fix failures → log everything, autonomously.
 
----
+______________________________________________________________________
 
 ## Phase 0: Environment Setup (30 min)
+
 **Goal**: Working Ollama + Python env, verified before anything else.
 
 ### Steps
+
 1. Install Ollama if not present: `curl -fsSL https://ollama.com/install.sh | sh`
-2. Pull a capable coding model: `ollama pull qwen2.5-coder:7b` (fallback: `deepseek-coder:6.7b`)
-3. Verify model responds: `ollama run qwen2.5-coder:7b "print hello world in python"`
-4. Create project directory: `mkdir -p ~/hackathon-agent && cd ~/hackathon-agent`
-5. Create Python venv: `python3 -m venv .venv && source .venv/bin/activate`
-6. Install minimal deps: `pip install requests`
+1. Pull a capable coding model: `ollama pull qwen2.5-coder:7b` (fallback: `deepseek-coder:6.7b`)
+1. Verify model responds: `ollama run qwen2.5-coder:7b "print hello world in python"`
+1. Create project directory: `mkdir -p ~/hackathon-agent && cd ~/hackathon-agent`
+1. Create Python venv: `python3 -m venv .venv && source .venv/bin/activate`
+1. Install minimal deps: `pip install requests`
 
 ### Test
+
 - `ollama list` shows the model
 - `python3 -c "import requests; print('ok')"` passes
 - A quick curl to `http://localhost:11434/api/generate` returns a response
 
----
+______________________________________________________________________
 
 ## Phase 1: Core Agent Loop (60 min)
+
 **Goal**: A single Python script `agent/run_agent.py` that can call the model, read files, write files, and run shell commands.
 
 ### Files to create
+
 ```
 agent/
   run_agent.py       # main loop
@@ -37,6 +42,7 @@ agent/
 ```
 
 ### `llm.py` — Ollama wrapper
+
 ```python
 def call_model(prompt: str, system: str = "") -> str:
     # POST to http://localhost:11434/api/generate
@@ -45,6 +51,7 @@ def call_model(prompt: str, system: str = "") -> str:
 ```
 
 ### `tools.py` — Tool helpers
+
 ```python
 def read_file(path: str) -> str
 def write_file(path: str, content: str) -> None
@@ -53,6 +60,7 @@ def list_dir(path: str) -> list
 ```
 
 ### `run_agent.py` — Main loop
+
 ```python
 state = {
     "spec": "",
@@ -70,7 +78,9 @@ while iteration < MAX_ITER:
 ```
 
 ### Model output format (strict JSON)
+
 Agent is prompted to respond ONLY with:
+
 ```json
 {
   "action": "write_file|run_command|read_file|stop",
@@ -82,15 +92,18 @@ Agent is prompted to respond ONLY with:
 ```
 
 ### Test
+
 - Run `python3 agent/run_agent.py --dry-run` → prints one model call and one action without side effects
 - Manually verify file write and command run work
 
----
+______________________________________________________________________
 
 ## Phase 2: Logging System (30 min)
+
 **Goal**: All 7 required log files written automatically during the loop.
 
 ### Files
+
 ```
 agent_logs/
   prompts.log
@@ -103,6 +116,7 @@ agent_logs/
 ```
 
 ### `logger.py`
+
 ```python
 class AgentLogger:
     def log_prompt(self, prompt)
@@ -116,14 +130,17 @@ class AgentLogger:
 All methods prepend `[YYYY-MM-DD HH:MM]` timestamps.
 
 ### Test
+
 - Run agent on a dummy task for 2 iterations → verify all log files exist and have timestamps
 
----
+______________________________________________________________________
 
 ## Phase 3: Spec Reader + Planner (45 min)
+
 **Goal**: Agent reads `SECRET_SPEC.md` and produces a structured plan before writing any code.
 
 ### Prompt: Phase 1 — Planning
+
 ```
 You are a coding agent. Read this specification carefully.
 Your ONLY task right now is to produce an implementation plan.
@@ -141,6 +158,7 @@ Output JSON:
 ```
 
 ### State machine
+
 ```
 PLANNING → IMPLEMENTING → TESTING → FIXING → TESTING → ... → DONE
 ```
@@ -148,15 +166,18 @@ PLANNING → IMPLEMENTING → TESTING → FIXING → TESTING → ... → DONE
 The agent only moves to IMPLEMENTING after the plan JSON is parsed and saved.
 
 ### Test
+
 - Point agent at a sample Markdown spec (write a toy one: "build a CLI that reverses a string")
 - Verify it outputs a valid plan JSON without writing any files
 
----
+______________________________________________________________________
 
 ## Phase 4: Code Generation + Test Runner (60 min)
+
 **Goal**: Agent generates code, runs public tests, parses results.
 
 ### Prompt: Phase 2 — Implementation
+
 ```
 Current plan: {plan}
 Current file contents: {files}
@@ -167,6 +188,7 @@ Output JSON: { "action": "write_file", "path": "...", "content": "..." }
 ```
 
 ### Test runner integration
+
 ```python
 def run_public_tests(workspace: str, program_cmd: str) -> dict:
     cmd = f"python3 secret_spec/test_runner/run_tests.py --program '{program_cmd}' --suite public"
@@ -175,15 +197,18 @@ def run_public_tests(workspace: str, program_cmd: str) -> dict:
 ```
 
 ### Test
+
 - Use toy spec + toy test suite (write 3 simple tests manually)
 - Agent generates code → tests run → score returned
 
----
+______________________________________________________________________
 
 ## Phase 5: Failure Analysis + Targeted Fix Loop (45 min)
+
 **Goal**: Agent reads failing test output and makes targeted patches (not full rewrites).
 
 ### Prompt: Phase 3 — Fixing
+
 ```
 Test result: {score}/{total}
 Failing categories: {categories}
@@ -200,6 +225,7 @@ Output JSON: { "action": "write_file", "path": "...", "content": "..." }
 ```
 
 ### Anti-thrash guard
+
 ```python
 if consecutive_no_improvement >= 3:
     # Force prompt: "Summarize WHY this category keeps failing, then try a different approach"
@@ -207,6 +233,7 @@ if consecutive_no_improvement >= 3:
 ```
 
 ### Rollback
+
 ```python
 # Before every write, snapshot current file
 snapshots[path] = current_content
@@ -218,14 +245,17 @@ if new_score < prev_score:
 ```
 
 ### Test
+
 - Intentionally break toy solution → agent should detect regression and rollback
 
----
+______________________________________________________________________
 
 ## Phase 6: Self-Test Generation (30 min)
+
 **Goal**: Agent generates additional tests from the spec to catch edge cases.
 
 ### Prompt: Self-test generation
+
 ```
 Based on this specification section: {spec_section}
 Generate 5 additional test cases as Python assertions.
@@ -234,6 +264,7 @@ Output only valid Python test code.
 ```
 
 ### Integration
+
 ```python
 def run_self_tests(workspace: str) -> dict:
     result = run_command("python3 agent_tests/self_generated_tests.py", cwd=workspace)
@@ -241,14 +272,17 @@ def run_self_tests(workspace: str) -> dict:
 ```
 
 ### Test
+
 - Run self-test generation on toy spec → verify output is valid Python → run it
 
----
+______________________________________________________________________
 
 ## Phase 7: agent_manifest.json + Final Report (20 min)
+
 **Goal**: Submission artifacts generated automatically at end of run.
 
 ### `generate_submission.py`
+
 ```python
 def write_manifest():
     # Writes agent_manifest.json with model name, provider, paid=false fields
@@ -258,15 +292,19 @@ def write_final_report(score_progression, interventions, failures):
 ```
 
 ### Test
+
 - Run `python3 generate_submission.py` → verify both files created and valid JSON
 
----
+______________________________________________________________________
 
 ## Phase 8: Dry Run on Toy Task (30 min)
+
 **Goal**: Full end-to-end test before 19:45 checkpoint.
 
 ### Toy spec
+
 Write `toy_spec/SPEC.md`:
+
 ```
 Build a CLI tool: python3 solution.py <input_file>
 - Reads a text file line by line
@@ -275,6 +313,7 @@ Build a CLI tool: python3 solution.py <input_file>
 ```
 
 Write 5 toy tests. Run the full agent loop. Verify:
+
 - [ ] Plan generated
 - [ ] Code written
 - [ ] Tests run
@@ -282,9 +321,10 @@ Write 5 toy tests. Run the full agent loop. Verify:
 - [ ] Logs written with timestamps
 - [ ] Manifest generated
 
----
+______________________________________________________________________
 
 ## Phase 9: Checkpoint at 19:45
+
 ```bash
 git add -A
 git commit -m "Agent readiness checkpoint"
@@ -292,21 +332,23 @@ git tag agent-readiness-1945
 git push --follow-tags
 ```
 
----
+______________________________________________________________________
 
 ## Phase 10: Real Run (20:00 onward)
+
 1. Copy `secret_spec/SECRET_SPEC.md` into agent workspace
-2. Run: `python3 agent/run_agent.py --spec secret_spec/SECRET_SPEC.md --workspace ./solution`
-3. Monitor logs in separate terminal: `tail -f agent_logs/test_runs.log`
-4. Let it run. Intervene only if:
+1. Run: `python3 agent/run_agent.py --spec secret_spec/SECRET_SPEC.md --workspace ./solution`
+1. Monitor logs in separate terminal: `tail -f agent_logs/test_runs.log`
+1. Let it run. Intervene only if:
    - Agent crashes → restart, log intervention
    - Agent stuck in loop >3 iterations → edit prompt, log intervention
    - Missing dependency → install, log intervention
-5. Log ALL interventions in `human_interventions.log`
+1. Log ALL interventions in `human_interventions.log`
 
----
+______________________________________________________________________
 
 ## File Structure (final)
+
 ```
 hackathon-agent/
   agent/
@@ -331,7 +373,7 @@ hackathon-agent/
   requirements.txt
 ```
 
----
+______________________________________________________________________
 
 ## Risk Mitigations
 
@@ -344,7 +386,7 @@ hackathon-agent/
 | Missing dependencies at 20:00 | Pre-install pytest, common stdlib-only approach for solution |
 | Model misunderstands spec | Phase 1 is PLAN ONLY — verify plan JSON before coding starts |
 
----
+______________________________________________________________________
 
 ## Time Budget
 
@@ -362,7 +404,7 @@ hackathon-agent/
 | 9: Checkpoint | 10 min | 6:00 |
 | Buffer / debugging | 2:00 | 8:00 |
 
----
+______________________________________________________________________
 
 ## Definition of Done (19:45 checkpoint)
 

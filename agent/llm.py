@@ -26,7 +26,9 @@ def _post(model: str, prompt: str, system: str) -> tuple[str, str]:
     resp = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
-    return data.get("response", ""), data.get("stop_reason", data.get("done_reason", "stop"))
+    return data.get("response", ""), data.get(
+        "stop_reason", data.get("done_reason", "stop")
+    )
 
 
 def call_model(prompt: str, system: str = "") -> str:
@@ -42,6 +44,7 @@ def call_model(prompt: str, system: str = "") -> str:
                 _primary_consecutive_errors = 0
             if stop_reason not in ("stop", "length", ""):
                 import sys
+
                 print(f"[llm] unexpected stop_reason={stop_reason!r}", file=sys.stderr)
             return text
         except (requests.ConnectionError, requests.Timeout) as e:
@@ -58,7 +61,10 @@ def call_model(prompt: str, system: str = "") -> str:
         if _primary_consecutive_errors >= 3:
             _active_model = MODEL_FALLBACK
             import sys
-            print(f"[llm] switching to fallback model {MODEL_FALLBACK}", file=sys.stderr)
+
+            print(
+                f"[llm] switching to fallback model {MODEL_FALLBACK}", file=sys.stderr
+            )
             try:
                 text, _ = _post(MODEL_FALLBACK, prompt, system)
                 return text
@@ -69,7 +75,9 @@ def call_model(prompt: str, system: str = "") -> str:
 
 
 def call_model_json(prompt: str, schema_hint: str = "") -> dict:
-    json_instruction = "Respond with ONLY valid JSON. No markdown, no prose, no code fences."
+    json_instruction = (
+        "Respond with ONLY valid JSON. No markdown, no prose, no code fences."
+    )
     if schema_hint:
         json_instruction += f" Expected shape: {schema_hint}"
 
@@ -93,4 +101,6 @@ def call_model_json(prompt: str, schema_hint: str = "") -> dict:
         except (json.JSONDecodeError, ValueError):
             continue
 
-    raise ValueError(f"call_model_json: no valid JSON after 3 attempts. Last response: {last_raw!r}")
+    raise ValueError(
+        f"call_model_json: no valid JSON after 3 attempts. Last response: {last_raw!r}"
+    )
