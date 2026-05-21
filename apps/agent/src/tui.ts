@@ -41,7 +41,7 @@ async function main(): Promise<number> {
   console.log(`needle-agent tui`);
   console.log(`log dir: ${logDir}`);
   console.log(`type a prompt and press enter`);
-  console.log(`commands: /status /quit`);
+  console.log(`commands: /status /ref <path> /refs /clear-refs /quit`);
 
   const rl = createInterface({
     input: process.stdin,
@@ -50,6 +50,7 @@ async function main(): Promise<number> {
   });
 
   let lastStatus = "";
+  let pendingRefs: string[] = [];
   const poll = setInterval(async () => {
     const state = await readState(logDir);
     const next = formatSnapshot(state);
@@ -79,9 +80,37 @@ async function main(): Promise<number> {
       rl.prompt();
       return;
     }
+    if (text === "/refs") {
+      if (pendingRefs.length === 0) console.log("no pending refs");
+      else console.log(`pending refs:\n- ${pendingRefs.join("\n- ")}`);
+      rl.prompt();
+      return;
+    }
+    if (text === "/clear-refs") {
+      pendingRefs = [];
+      console.log("cleared pending refs");
+      rl.prompt();
+      return;
+    }
+    if (text.startsWith("/ref ")) {
+      const ref = text.slice(5).trim();
+      if (!ref) {
+        console.log("usage: /ref <path>");
+      } else if (pendingRefs.includes(ref)) {
+        console.log(`already added: ${ref}`);
+      } else {
+        pendingRefs.push(ref);
+        console.log(`added ref: ${ref}`);
+      }
+      rl.prompt();
+      return;
+    }
 
-    const prompt = await enqueueOperatorPrompt(logDir, text, true);
-    console.log(`queued prompt at ${prompt.ts}`);
+    const prompt = await enqueueOperatorPrompt(logDir, text, true, pendingRefs);
+    console.log(
+      `queued prompt at ${prompt.ts}${pendingRefs.length > 0 ? ` with ${pendingRefs.length} ref(s)` : ""}`,
+    );
+    pendingRefs = [];
     rl.prompt();
   });
 

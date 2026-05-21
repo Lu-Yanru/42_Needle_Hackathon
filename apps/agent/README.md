@@ -58,6 +58,9 @@ bun run tui --log-dir ../../.needle-agent
 Type a line and press Enter to queue it for the next model turn. Use `/status`
 to refresh the current phase and `/quit` to exit the TUI.
 
+Use `/ref <path>` before sending a prompt to attach reference files. Relative
+paths are resolved from the agent workspace; absolute paths work too.
+
 ## Output
 
 All run data is written to `.needle-agent/` at the monorepo root (override

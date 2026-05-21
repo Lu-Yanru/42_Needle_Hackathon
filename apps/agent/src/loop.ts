@@ -8,6 +8,7 @@
 // tool calls, so we never rely on `message.tool_calls`.
 
 import { z } from "zod";
+import { resolve } from "node:path";
 import { MAX_INNER_STEPS, MODEL, NO_IMPROVEMENT_LIMIT } from "./config";
 import type { EventLog } from "./events";
 import type { Logger } from "./logger";
@@ -131,6 +132,30 @@ async function renderFiles(workspace: Workspace, entrypoint: string | null): Pro
     contents.set(entrypoint, t.content);
   }
   return renderWorkspacePreview(files, contents, entrypoint);
+}
+
+async function renderOperatorReferenceFiles(
+  workspace: Workspace,
+  refs: string[],
+): Promise<string> {
+  if (refs.length === 0) return "";
+
+  const blocks: string[] = [];
+  for (const ref of refs) {
+    const resolved = ref.startsWith("/") ? ref : resolve(workspace.root, ref);
+    const file = Bun.file(resolved);
+    if (!(await file.exists())) {
+      blocks.push(`FILE REF: ${ref}\n(unavailable: file not found at ${resolved})`);
+      continue;
+    }
+    const raw = await file.text().catch(() => "");
+    const truncated = truncateHead(raw, { maxLines: 120, maxBytes: 8000 });
+    blocks.push(
+      `FILE REF: ${ref}\n\`\`\`\n${truncated.content || "(empty file)"}\n\`\`\`${truncated.truncated ? "\n(truncated)" : ""}`,
+    );
+  }
+
+  return blocks.join("\n\n");
 }
 
 async function doPlanning(state: RunState, logger: Logger, events: EventLog): Promise<void> {
@@ -321,25 +346,29 @@ async function doModelPhase(
 
   const files = await renderFiles(workspace, state.plan.entrypoint);
   const operatorPrompts = await drainOperatorPrompts(logger.dir);
-  const operatorSection =
-    operatorPrompts.length === 0
-      ? ""
-      : `\n\nOPERATOR NUDGES\n${operatorPrompts
-          .map((prompt, index) => `${index + 1}. ${prompt.text}`)
-          .join("\n")}\nTreat these as high-priority instructions unless they conflict with the specification.\n`;
+  const operatorBlocks: string[] = [];
   for (const prompt of operatorPrompts) {
+    const renderedRefs = await renderOperatorReferenceFiles(workspace, prompt.refs);
+    operatorBlocks.push(
+      `${operatorBlocks.length + 1}. ${prompt.text}${renderedRefs ? `\n\n${renderedRefs}` : ""}`,
+    );
     await logger.prompt("OPERATOR", prompt.text);
     if (prompt.intervention) {
       await logger.humanIntervention(
-        `Operator prompt queued for next model turn.\nPrompt: ${prompt.text}\nTouched final task code: NO`,
+        `Operator prompt queued for next model turn.\nPrompt: ${prompt.text}\nReference files: ${prompt.refs.length > 0 ? prompt.refs.join(", ") : "(none)"}\nTouched final task code: NO`,
       );
     }
     await events.emit("operator_prompt", {
       phase: state.phase,
       text: prompt.text.slice(0, 200),
       intervention: prompt.intervention,
+      refs: prompt.refs,
     });
   }
+  const operatorSection =
+    operatorBlocks.length === 0
+      ? ""
+      : `\n\nOPERATOR NUDGES\n${operatorBlocks.join("\n\n")}\nTreat these as high-priority instructions unless they conflict with the specification.\n`;
   let userPrompt: string;
   if (state.phase === "IMPLEMENTING") {
     userPrompt = prompts.implementingPrompt(state.plan, files, state.verificationCommands);

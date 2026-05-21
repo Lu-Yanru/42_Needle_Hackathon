@@ -4,6 +4,7 @@ export interface OperatorPrompt {
   ts: string;
   text: string;
   intervention: boolean;
+  refs: string[];
 }
 
 function queuePath(logDir: string): string {
@@ -18,11 +19,13 @@ export async function enqueueOperatorPrompt(
   logDir: string,
   text: string,
   intervention = true,
+  refs: string[] = [],
 ): Promise<OperatorPrompt> {
   const prompt: OperatorPrompt = {
     ts: nowIso(),
     text: text.trim(),
     intervention,
+    refs,
   };
   const path = queuePath(logDir);
   const existing = (await Bun.file(path).text().catch(() => "")) || "";

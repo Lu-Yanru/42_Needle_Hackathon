@@ -131,15 +131,15 @@ export function AgentChat({ run, snapshot, onSendPrompt }: AgentChatProps) {
     ]);
 
     let reply = "";
-    let model = run.model || "qwen2.5-coder:32b";
+    let model = run.model || "agent";
     try {
       const res = await onSendPrompt(text.trim(), intervention);
       reply = res.reply;
       model = res.model;
     } catch {
       reply =
-        "Acknowledged. Will apply on next iteration boundary. Estimating 2 iters to evaluate impact; reverting if score drops > 5.";
-      model = "offline-fallback";
+        "The prompt could not be delivered — the operator server is unreachable. Nothing was logged; please retry.";
+      model = "delivery failed";
     }
 
     const ts2 = fmtTsLong(new Date()).slice(11);

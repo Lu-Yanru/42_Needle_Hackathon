@@ -306,75 +306,15 @@ export function Workspace({ files, onOpenDiff }: { files: WorkspaceFile[]; onOpe
   );
 }
 
-// ---------- DIFF MODAL ----------
+// ---------- FILE VIEWER MODAL ----------
 
-interface DiffLine {
-  ln: string;
-  kind: "add" | "rem" | "ctx";
-  text: string;
-}
-
-const CANNED_DIFF: Record<string, [number, string, string][]> = {
-  "src/parser.py": [
-    [78, " ", "def parse_block(tokens):"],
-    [79, " ", '    """Parse a top-level block. May recurse for nested structures."""'],
-    [80, "-", "    if not tokens:"],
-    [81, "-", "        raise ParseError('empty input')"],
-    [82, "+", "    if not tokens:"],
-    [83, "+", "        return Block(children=[])"],
-    [84, " ", ""],
-    [85, " ", "    head = tokens.pop(0)"],
-    [86, "-", "    if head.type == 'OPEN':"],
-    [87, "+", "    if head.type in ('OPEN', 'OPEN_LIST'):"],
-    [88, " ", "        body = parse_block(tokens)"],
-    [89, " ", "        close = tokens.pop(0)"],
-  ],
-  "src/eval.py": [
-    [86, " ", "def evaluate(expr, env=None):"],
-    [87, " ", "    env = env or {}"],
-    [88, "-", "    if isinstance(expr, list):"],
-    [89, "-", "        return [evaluate(e, env) for e in expr]"],
-    [90, "+", "    if isinstance(expr, list):"],
-    [91, "+", "        return tuple(evaluate(e, env) for e in expr)"],
-    [92, " ", ""],
-    [93, "-", "    if expr.kind == 'binop':"],
-    [94, "-", "        l = evaluate(expr.left, env); r = evaluate(expr.right, env)"],
-    [95, "+", "    if expr.kind == 'binop':"],
-    [96, "+", "        l, r = evaluate(expr.left, env), evaluate(expr.right, env)"],
-    [97, "+", "        if expr.op == '/' and r == 0:"],
-    [98, "+", "            raise EvalError('division by zero', expr)"],
-    [99, " ", "        return OPS[expr.op](l, r)"],
-  ],
-  "src/io_utils.py": [
-    [1, "+", '"""I/O helpers — separated from main loop for testability."""'],
-    [2, "+", "import sys"],
-    [3, "+", ""],
-    [4, "+", "def read_stdin():"],
-    [5, "+", "    try:"],
-    [6, "+", "        return sys.stdin.read()"],
-    [7, "+", "    except EOFError:"],
-    [8, "+", "        return ''"],
-  ],
-};
-
-function buildFakeDiff(file: WorkspaceFile): DiffLine[] {
-  const canned = CANNED_DIFF[file.path];
-  if (canned) {
-    return canned.map(([ln, sg, text]) => ({
-      ln: String(ln),
-      kind: sg === "+" ? "add" : sg === "-" ? "rem" : "ctx",
-      text,
-    }));
-  }
-  return Array.from({ length: 14 }).map((_, i) => ({
-    ln: String(i + 1),
-    kind: i % 5 === 2 ? "add" : i % 7 === 3 ? "rem" : "ctx",
-    text: `# ${file.path} — line ${i + 1}`,
-  }));
-}
-
+// Shows the file's real, current contents read live from the agent workspace.
+// There is no synthetic before/after diff — every line here is the actual file.
 export function DiffModal({ file, onClose }: { file: WorkspaceFile | null; onClose: () => void }) {
-  const diff = useMemo(() => (file ? buildFakeDiff(file) : []), [file]);
+  const lines = useMemo(
+    () => (file?.content ? file.content.replace(/\n$/, "").split("\n") : []),
+    [file],
+  );
   if (!file) return null;
   return (
     <div className="modal-back" onClick={onClose}>
@@ -393,14 +333,7 @@ export function DiffModal({ file, onClose }: { file: WorkspaceFile | null; onClo
               </span>
             </div>
             <div className="mono dim" style={{ fontSize: 10.5, marginTop: 3 }}>
-              {file.added > 0 && <span style={{ color: "var(--ok)" }}>+{file.added}</span>}
-              {file.removed > 0 && (
-                <>
-                  {" "}
-                  <span style={{ color: "var(--bad)" }}>−{file.removed}</span>
-                </>
-              )}
-              {file.hasSnapshot && <> · snapshot available</>}
+              {file.added} lines · live contents from the agent workspace
             </div>
           </div>
           <button type="button" className="btn btn-icon btn-ghost" onClick={onClose} aria-label="Close">
@@ -408,13 +341,20 @@ export function DiffModal({ file, onClose }: { file: WorkspaceFile | null; onClo
           </button>
         </div>
         <div className="modal-body">
-          {diff.map((line, i) => (
-            <div key={i} className={`diff-line ${line.kind}`}>
-              <span className="ln">{line.ln}</span>
-              <span className="sg">{line.kind === "add" ? "+" : line.kind === "rem" ? "−" : " "}</span>
-              <span className="tx">{line.text}</span>
+          {lines.length === 0 ? (
+            <div className="empty" style={{ padding: 24 }}>
+              <div className="ic">○</div>
+              (empty file)
             </div>
-          ))}
+          ) : (
+            lines.map((text, i) => (
+              <div key={i} className="diff-line ctx">
+                <span className="ln">{i + 1}</span>
+                <span className="sg"> </span>
+                <span className="tx">{text}</span>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </div>

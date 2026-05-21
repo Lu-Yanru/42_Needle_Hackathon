@@ -14,45 +14,43 @@ const C = {
   bad: "#f87171",
 };
 
-const PHASES = ["PLANNING", "IMPLEMENTING", "TESTING", "FIXING", "DONE"] as const;
+const PHASES = ["PLANNING", "GENERATE_TESTS", "IMPLEMENTING", "TESTING", "FIXING", "DONE"] as const;
 
-const SCENARIO_OPTIONS: { value: Scenario; label: string }[] = [
-  { value: "climbing", label: "scenario · mid-run, climbing" },
-  { value: "stuck", label: "scenario · stuck / regressing" },
-  { value: "done", label: "scenario · run complete" },
-  { value: "empty", label: "scenario · empty — no run" },
-];
+/** Compact thousands formatting for token counts. */
+function fmtK(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
 
 // ---------- STATUS BAR ----------
 
 interface StatusBarProps {
   run: RunState;
+  stats: RunStats;
   deadline: string;
   /** Epoch ms of the last successful poll, for the "last update" tooltip. */
   dataUpdatedAt: number;
   view: "mission" | "chat";
   onViewChange: (v: "mission" | "chat") => void;
   chatUnread: number;
-  scenario: Scenario;
-  onScenarioChange: (s: Scenario) => void;
   onAction: (action: ControlAction) => void;
 }
 
 export function StatusBar({
   run,
+  stats,
   deadline,
   dataUpdatedAt,
   view,
   onViewChange,
   chatUnread,
-  scenario,
-  onScenarioChange,
   onAction,
 }: StatusBarProps) {
   // Tick every second so elapsed + countdown stay live.
   useTicker(1000);
   const now = Date.now();
-  const elapsed = run.startedAt ? now - new Date(run.startedAt).getTime() : null;
+  // Freeze elapsed once the run finishes, instead of counting up forever.
+  const endRef = run.completedAt ? new Date(run.completedAt).getTime() : now;
+  const elapsed = run.startedAt ? endRef - new Date(run.startedAt).getTime() : null;
   const remainingMs = new Date(deadline).getTime() - now;
   const urgent = remainingMs < 30 * 60 * 1000;
   const overdue = remainingMs < 0;
@@ -95,7 +93,15 @@ export function StatusBar({
         </div>
 
         <div className="topbar-mid">
-          {run.phase ? (
+          {!run.phase ? (
+            <div className="dim mono" style={{ fontSize: 11 }}>
+              NO ACTIVE RUN
+            </div>
+          ) : run.phase === "FAILED" ? (
+            <div className="mono" style={{ fontSize: 11, color: "var(--bad)", fontWeight: 600 }}>
+              ⚠ RUN FAILED
+            </div>
+          ) : (
             <div className="stepper">
               {PHASES.map((p, i) => {
                 const isDone = i < activeIdx || (run.phase === "DONE" && i <= activeIdx);
@@ -104,14 +110,10 @@ export function StatusBar({
                 return (
                   <div key={p} className={`step ${cls}`}>
                     <span className="step-dot" />
-                    <span>{p}</span>
+                    <span>{p === "GENERATE_TESTS" ? "GEN TESTS" : p}</span>
                   </div>
                 );
               })}
-            </div>
-          ) : (
-            <div className="dim mono" style={{ fontSize: 11 }}>
-              NO ACTIVE RUN
             </div>
           )}
 
@@ -127,24 +129,22 @@ export function StatusBar({
             <div>
               <span className="lab">ELAPSED</span> <span className="val">{formatElapsed(elapsed)}</span>
             </div>
+            <div>
+              <span className="lab">CALLS</span>{" "}
+              <span className="val">
+                {stats.modelCalls}
+                <span className="dim">m</span> {stats.toolCalls}
+                <span className="dim">t</span>
+              </span>
+            </div>
+            <div>
+              <span className="lab">TOKENS</span>{" "}
+              <span className="val">{fmtK(stats.inputTokens + stats.outputTokens)}</span>
+            </div>
           </div>
         </div>
 
         <div className="topbar-right">
-          <select
-            className="scenario-pick"
-            value={scenario}
-            onChange={(e) => onScenarioChange(e.target.value as Scenario)}
-            title="Demo scenario — mock data has no live agent yet"
-            aria-label="Demo scenario"
-          >
-            {SCENARIO_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-
           <span
             className="live-ind"
             title={`Polling every 2.5s · last update ${formatRelativeMs(now - dataUpdatedAt)}`}
