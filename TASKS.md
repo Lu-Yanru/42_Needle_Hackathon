@@ -17,6 +17,13 @@ ______________________________________________________________________
 
 If anyone is sick / late, **C absorbs B's prompts work**, **A absorbs C's test-runner**. Do not block on the missing person.
 
+**If D can't make it**: split D's work by priority, drop the stretch goal.
+
+- **Toy spec + toy tests (critical, A picks up)** — A is the downstream consumer of these for the test-runner glue, so they have to exist. ~45 min carved out of A's 15:00 - 17:00 block.
+- **README + run-the-agent docs (C picks up)** — small, fits next to C's manifest/final-report work at 17:00 - 19:00.
+- **Phase 6 self-test generation (drop)** — it's a stretch goal in `PLAN.md`. Skip it entirely; nobody backfills.
+- **Phase 8 dry run at 19:00** — already an all-hands activity, no change needed.
+
 ______________________________________________________________________
 
 ## Timeline & sync points
