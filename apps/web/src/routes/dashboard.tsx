@@ -2,8 +2,8 @@ import type {
   AgentSnapshot,
   ControlAction,
   InterventionInput,
+  Phase,
   PromptResult,
-  Scenario,
 } from "@needle-agent/api/agent/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
@@ -41,16 +41,24 @@ function RouteComponent() {
   );
 }
 
+interface SnapshotMarker {
+  phase: Phase | null;
+  scores: number;
+  errors: number;
+  stuck: boolean;
+}
+
 function OperatorConsole() {
   const toast = useToast();
   const queryClient = useQueryClient();
 
+  // The single source of truth — polled from the server, which reads the
+  // agent's real .needle-agent/ artifacts on every request.
   const snapshotOpts = orpc.agent.snapshot.queryOptions();
   const query = useQuery({ ...snapshotOpts, refetchInterval: 2500 });
 
   const [view, setView] = useState<"mission" | "chat">("mission");
   const [chatUnread, setChatUnread] = useState(0);
-  const prevScenario = useRef<Scenario | null>(null);
 
   const setSnapshot = useCallback(
     (snap: AgentSnapshot) => queryClient.setQueryData(snapshotOpts.queryKey, snap),
@@ -59,10 +67,6 @@ function OperatorConsole() {
 
   const controlMut = useMutation({
     ...orpc.agent.control.mutationOptions(),
-    onSuccess: setSnapshot,
-  });
-  const scenarioMut = useMutation({
-    ...orpc.agent.setScenario.mutationOptions(),
     onSuccess: setSnapshot,
   });
   const interventionMut = useMutation({
@@ -75,45 +79,75 @@ function OperatorConsole() {
   });
   const promptMut = useMutation(orpc.agent.sendPrompt.mutationOptions());
 
-  // Demo toasts when the scenario changes — showcases the brief's required
-  // toast types (new run / stuck / regression / complete).
-  const scenario = query.data?.scenario;
+  // Data-driven toasts: fire only when the real polled snapshot actually
+  // changes (new test run, phase transition, regression, stuck, error).
+  const snapshot = query.data;
+  const marker = useRef<SnapshotMarker | null>(null);
   useEffect(() => {
-    if (!scenario) return;
-    if (prevScenario.current === scenario) return;
-    const first = prevScenario.current === null;
-    prevScenario.current = scenario;
-    if (first) return;
-    if (scenario === "climbing") {
-      setTimeout(() => toast({ type: "info", title: "New test run completed", sub: "iter 22 · 137/250 (+5)" }), 700);
-    } else if (scenario === "stuck") {
-      setTimeout(() => toast({ type: "warn", title: "Agent stuck", sub: "no score change for 3 iterations" }), 600);
-      setTimeout(() => toast({ type: "bad", title: "Regression detected", sub: "score 108 → 104 at iter 13" }), 1700);
-    } else if (scenario === "done") {
-      setTimeout(() => toast({ type: "ok", title: "Run complete", sub: "189/250 · final_report.md generated" }), 700);
+    if (!snapshot) return;
+    const cur: SnapshotMarker = {
+      phase: snapshot.run.phase,
+      scores: snapshot.scores.length,
+      errors: snapshot.stats.errors,
+      stuck: snapshot.run.stuck,
+    };
+    const last = marker.current;
+    marker.current = cur;
+    if (!last) return; // first load — no toast spam
+
+    if (cur.scores > last.scores) {
+      const latest = snapshot.scores[snapshot.scores.length - 1]!;
+      const before = snapshot.scores[snapshot.scores.length - 2];
+      const delta = before ? latest.score - before.score : 0;
+      if (latest.regressed) {
+        toast({
+          type: "bad",
+          title: "Regression detected",
+          sub: `score ${before?.score ?? "?"} → ${latest.score} at iter ${latest.iter}`,
+        });
+      } else {
+        toast({
+          type: "info",
+          title: "New test run completed",
+          sub: `iter ${latest.iter} · ${latest.score}/${latest.total}${delta ? ` (${delta > 0 ? "+" : ""}${delta})` : ""}`,
+        });
+      }
     }
-  }, [scenario, toast]);
+    if (cur.phase !== last.phase) {
+      if (cur.phase === "DONE") {
+        toast({ type: "ok", title: "Run complete", sub: "agent reached the DONE phase" });
+      } else if (cur.phase === "FAILED") {
+        toast({ type: "bad", title: "Run failed", sub: "check errors.log for details" });
+      } else if (cur.phase) {
+        toast({ type: "info", title: `Phase: ${cur.phase}` });
+      }
+    }
+    if (cur.stuck && !last.stuck) {
+      toast({ type: "warn", title: "Agent stuck", sub: "no score change for 3+ iterations" });
+    }
+    if (cur.errors > last.errors) {
+      toast({ type: "bad", title: "Agent error logged", sub: `${cur.errors} total this run` });
+    }
+  }, [snapshot, toast]);
 
   const onAction = useCallback(
     async (action: ControlAction) => {
       try {
         await controlMut.mutateAsync({ action });
-        if (action === "start") toast({ type: "ok", title: "Run started", sub: "PLANNING phase · iter 0" });
-        else if (action === "pause") toast({ type: "warn", title: "Run paused" });
-        else if (action === "resume") toast({ type: "ok", title: "Run resumed" });
-        else toast({ type: "bad", title: "Run stopped", sub: "manual STOP — partial results saved" });
+        if (action === "start") {
+          toast({ type: "ok", title: "Agent started", sub: "spawned agent process · fresh run" });
+        } else if (action === "pause") {
+          toast({ type: "warn", title: "Agent paused", sub: "SIGSTOP sent to the run" });
+        } else if (action === "resume") {
+          toast({ type: "ok", title: "Agent resumed", sub: "SIGCONT sent to the run" });
+        } else {
+          toast({ type: "bad", title: "Agent stopped", sub: "SIGTERM sent · partial results saved" });
+        }
       } catch {
         toast({ type: "bad", title: "Action failed", sub: "could not reach the agent server" });
       }
     },
     [controlMut, toast],
-  );
-
-  const onScenarioChange = useCallback(
-    (next: Scenario) => {
-      scenarioMut.mutate({ scenario: next });
-    },
-    [scenarioMut],
   );
 
   const onViewChange = useCallback((next: "mission" | "chat") => {
@@ -134,9 +168,10 @@ function OperatorConsole() {
   );
 
   const onRegenerateReport = useCallback(() => {
-    toast({ type: "info", title: "Regenerating final report…", sub: "compiling from logs + score history" });
+    toast({ type: "info", title: "Regenerating final report…", sub: "compiling from real run data" });
     regenerateMut.mutate(undefined, {
-      onSuccess: () => toast({ type: "ok", title: "Final report generated", sub: "final_report.md updated" }),
+      onSuccess: () => toast({ type: "ok", title: "Final report generated", sub: "final_report.md written" }),
+      onError: () => toast({ type: "bad", title: "Report generation failed" }),
     });
   }, [regenerateMut, toast]);
 
@@ -147,7 +182,9 @@ function OperatorConsole() {
       toast({
         type: intervention ? "warn" : "info",
         title: "Prompt sent to agent",
-        sub: intervention ? "logged to prompts.log + human_interventions.log" : "logged to prompts.log only",
+        sub: intervention
+          ? "logged to prompts.log + human_interventions.log"
+          : "logged to prompts.log",
       });
       if (view !== "chat") setChatUnread((n) => n + 1);
       return res.result;
@@ -167,27 +204,26 @@ function OperatorConsole() {
     );
   }
 
-  const snapshot = query.data;
+  const snap = query.data;
 
   return (
     <>
       <StatusBar
-        run={snapshot.run}
-        deadline={snapshot.deadline}
+        run={snap.run}
+        stats={snap.stats}
+        deadline={snap.deadline}
         dataUpdatedAt={query.dataUpdatedAt}
         view={view}
         onViewChange={onViewChange}
         chatUnread={chatUnread}
-        scenario={snapshot.scenario}
-        onScenarioChange={onScenarioChange}
         onAction={onAction}
       />
 
       {view === "chat" ? (
-        <AgentChat run={snapshot.run} snapshot={snapshot} onSendPrompt={onSendPrompt} />
+        <AgentChat run={snap.run} snapshot={snap} onSendPrompt={onSendPrompt} />
       ) : (
         <MissionControl
-          snapshot={snapshot}
+          snapshot={snap}
           onLogIntervention={onLogIntervention}
           onRegenerateReport={onRegenerateReport}
         />

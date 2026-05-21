@@ -70,6 +70,10 @@ export class Logger {
     await Bun.write(path, `${existing}${text}\n`);
   }
 
+  async humanIntervention(text: string): Promise<void> {
+    await this.append("human_interventions.log", `${timestamp()} NUDGE\n${text}\n`);
+  }
+
   async prompt(phase: string, text: string): Promise<void> {
     await this.append(
       "prompts.log",

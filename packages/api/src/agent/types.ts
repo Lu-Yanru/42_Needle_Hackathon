@@ -1,9 +1,15 @@
 // Shared types for the Operator Console agent data model.
-// The server owns the source of truth; the web app consumes these via oRPC.
+// The server owns the source of truth — it reads the agent's real run
+// artifacts under .needle-agent/ — and the web app consumes these via oRPC.
 
-export type Phase = "PLANNING" | "IMPLEMENTING" | "TESTING" | "FIXING" | "DONE" | "ERROR";
-
-export type Scenario = "climbing" | "stuck" | "done" | "empty";
+export type Phase =
+  | "PLANNING"
+  | "GENERATE_TESTS"
+  | "IMPLEMENTING"
+  | "TESTING"
+  | "FIXING"
+  | "DONE"
+  | "FAILED";
 
 export type TimelineType = "plan" | "decide" | "cmd" | "test" | "edit" | "fail" | "error" | "human";
 
@@ -15,12 +21,21 @@ export interface RunState {
   maxIterations: number;
   /** ISO timestamp, or null when no run has started. */
   startedAt: string | null;
-  /** ISO timestamp, set once a run reaches DONE. */
+  /** ISO timestamp, set once a run reaches DONE / FAILED. */
   completedAt: string | null;
   model: string;
   running: boolean;
   paused: boolean;
   stuck: boolean;
+}
+
+/** Cumulative run counters, straight from the agent's state.json. */
+export interface RunStats {
+  modelCalls: number;
+  toolCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  errors: number;
 }
 
 export interface FailingCategory {
@@ -58,6 +73,8 @@ export interface WorkspaceFile {
   removed: number;
   hasSnapshot: boolean;
   rolledBack: boolean;
+  /** Current file contents — read live from the agent workspace. */
+  content: string;
 }
 
 export interface Manifest {
@@ -81,8 +98,8 @@ export interface ChecklistItem {
 }
 
 export interface AgentSnapshot {
-  scenario: Scenario;
   run: RunState;
+  stats: RunStats;
   scores: ScorePoint[];
   timeline: TimelineEvent[];
   logs: Logs;
@@ -90,7 +107,7 @@ export interface AgentSnapshot {
   manifest: Manifest;
   checklist: ChecklistItem[];
   report: string | null;
-  /** ISO timestamp of the Friday 12:00 submission deadline. */
+  /** ISO timestamp of the submission deadline. */
   deadline: string;
   /** ISO timestamp the snapshot was last produced by the server. */
   updatedAt: string;

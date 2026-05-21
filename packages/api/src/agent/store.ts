@@ -1,160 +1,868 @@
-// In-memory store backing the Operator Console.
-// Holds one mutable run snapshot plus a fixed submission deadline, and applies
-// operator actions (run controls, interventions, prompts, report generation).
-// When a real agent backend exists, swap these functions for agent_logs/ reads.
+// Operator Console data source — backed entirely by the agent's real run
+// artifacts under .needle-agent/ (run.jsonl, state.json, the seven *.log files)
+// plus the live agent workspace. There is no mock data: every field returned
+// here is read from a file the agent actually wrote.
+//
+//   run.jsonl  — append-only structured event stream (timeline + scores)
+//   state.json — current-status snapshot (phase, iteration, counters)
+//   *.log      — the seven required human-readable logs
+//
+// Operator actions write back to the same real files and, for run controls,
+// spawn / signal the actual agent process.
 
-import { buildScenario, fmtTsLong, synthReport, type ScenarioSnapshot } from "./data";
-import type { AgentSnapshot, ControlAction, InterventionInput, PromptInput, PromptResult, Scenario, TimelineEvent } from "./types";
+import { existsSync, readdirSync, rmSync, statSync, type Stats } from "node:fs";
+import { cpus, totalmem } from "node:os";
+import { dirname, join } from "node:path";
 
-// Friday 12:00 submission deadline. Anchored once at server start to ~5.5h out
-// so the countdown visibly ticks and crosses into its "urgent" state.
-const DEADLINE = new Date(Date.now() + 5 * 3600 * 1000 + 28 * 60 * 1000).toISOString();
+import type {
+  AgentSnapshot,
+  ChecklistItem,
+  ControlAction,
+  FailingCategory,
+  InterventionInput,
+  Logs,
+  Manifest,
+  Phase,
+  PromptInput,
+  PromptResult,
+  RunState,
+  RunStats,
+  ScorePoint,
+  TimelineEvent,
+  TimelineType,
+  WorkspaceFile,
+} from "./types";
 
-let current: ScenarioSnapshot = buildScenario("climbing");
+// ---------- paths ----------
 
-function withMeta(): AgentSnapshot {
-  return { ...current, deadline: DEADLINE, updatedAt: new Date().toISOString() };
+/** Walk up to the monorepo root (the directory holding turbo.json). */
+function findRepoRoot(): string {
+  let dir = import.meta.dir;
+  for (let i = 0; i < 12; i++) {
+    if (existsSync(join(dir, "turbo.json"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
 }
 
-export function getSnapshot(): AgentSnapshot {
-  return withMeta();
+const REPO_ROOT = findRepoRoot();
+const OUT_DIR = join(REPO_ROOT, ".needle-agent");
+const AGENT_DIR = join(REPO_ROOT, "apps/agent");
+const DEFAULT_WORKSPACE = join(AGENT_DIR, "solution");
+
+/** The seven required log files, in the order the console shows them. */
+const LOG_FILES = [
+  "prompts.log",
+  "decisions.log",
+  "commands.log",
+  "test_runs.log",
+  "errors.log",
+  "human_interventions.log",
+] as const;
+
+// ---------- low-level file readers ----------
+
+async function readText(path: string): Promise<string> {
+  const file = Bun.file(path);
+  return (await file.exists()) ? file.text() : "";
 }
 
-export function setScenario(scenario: Scenario): AgentSnapshot {
-  current = buildScenario(scenario);
-  return withMeta();
+interface RunEvent {
+  seq: number;
+  ts: string;
+  type: string;
+  [key: string]: unknown;
 }
 
-export function control(action: ControlAction): AgentSnapshot {
+/** Parse run.jsonl into ordered events; bad lines are skipped, not fatal. */
+async function readRunEvents(): Promise<RunEvent[]> {
+  const raw = await readText(join(OUT_DIR, "run.jsonl"));
+  const events: RunEvent[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as RunEvent;
+      if (parsed && typeof parsed.type === "string") events.push(parsed);
+    } catch {
+      // a half-written final line during a live run — ignore it
+    }
+  }
+  return events;
+}
+
+interface StateFile {
+  updatedAt: string;
+  phase: Phase;
+  iteration: number;
+  maxIterations: number;
+  bestScore: number;
+  noImprovementStreak: number;
+  lastScore: number | null;
+  lastTotal: number | null;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  modelCalls: number;
+  toolCalls: number;
+  errors: number;
+  done: boolean;
+}
+
+async function readState(): Promise<StateFile | null> {
+  const raw = await readText(join(OUT_DIR, "state.json"));
+  if (!raw.trim()) return null;
+  try {
+    return JSON.parse(raw) as StateFile;
+  } catch {
+    return null;
+  }
+}
+
+const str = (e: RunEvent, k: string): string => (typeof e[k] === "string" ? (e[k] as string) : "");
+const num = (e: RunEvent, k: string): number => (typeof e[k] === "number" ? (e[k] as number) : 0);
+
+// ---------- snapshot builders ----------
+
+/** "YYYY-MM-DD HH:MM" from an ISO timestamp, in local time. */
+function fmtStamp(iso: string, withSeconds = false): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, "0");
+  const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const time = `${p(d.getHours())}:${p(d.getMinutes())}${withSeconds ? `:${p(d.getSeconds())}` : ""}`;
+  return `${date} ${time}`;
+}
+
+function groupFailing(failing: unknown): FailingCategory[] {
+  if (!Array.isArray(failing)) return [];
+  const counts = new Map<string, number>();
+  for (const item of failing) {
+    const name = String(item);
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([name, count]) => ({ name, count }));
+}
+
+/** Score progression — one point per `test_run` event in run.jsonl. */
+function buildScores(events: RunEvent[]): ScorePoint[] {
+  const scores: ScorePoint[] = [];
+  let iter = 0;
+  let prevScore: number | null = null;
+  for (const e of events) {
+    if (e.type === "phase_start") iter = num(e, "iteration");
+    if (e.type !== "test_run") continue;
+    const score = num(e, "score");
+    const total = num(e, "total");
+    const regressed = prevScore !== null && score < prevScore;
+    scores.push({
+      iter,
+      timestamp: fmtStamp(e.ts),
+      score,
+      total,
+      suite: str(e, "source") === "official" ? "official suite" : "spec-derived self-tests",
+      regressed,
+      failingCategories: groupFailing(e.failing),
+    });
+    prevScore = score;
+  }
+  return scores;
+}
+
+const TOOL_TIMELINE_TYPE: Record<string, TimelineType> = {
+  write_file: "edit",
+  edit_file: "edit",
+  read_file: "cmd",
+  list_dir: "cmd",
+  run_command: "cmd",
+};
+
+/** Agent activity feed — run.jsonl events mapped to timeline rows, newest first. */
+function buildTimeline(events: RunEvent[]): TimelineEvent[] {
+  const rows: TimelineEvent[] = [];
+  for (const e of events) {
+    const ts = fmtStamp(e.ts, true);
+    switch (e.type) {
+      case "run_start":
+        rows.push({
+          ts,
+          type: "decide",
+          summary: `Run started · model ${str(e, "model")}`,
+          meta: str(e, "spec"),
+          detail: `Workspace: ${str(e, "workspace")}\nMax iterations: ${num(e, "maxIterations")}`,
+        });
+        break;
+      case "phase_start":
+        rows.push({
+          ts,
+          type: "decide",
+          summary: `Entered ${str(e, "phase")} phase`,
+          meta: `iter ${num(e, "iteration")}`,
+          detail: null,
+        });
+        break;
+      case "plan":
+        rows.push({
+          ts,
+          type: "plan",
+          summary: `Plan accepted · ${num(e, "steps")} steps`,
+          meta: `entry ${str(e, "entrypoint")}`,
+          detail: `Run command: ${str(e, "runCommand")}`,
+        });
+        break;
+      case "self_tests":
+        rows.push({
+          ts,
+          type: "decide",
+          summary: `Generated ${num(e, "count")} spec-derived test cases`,
+          meta: "GENERATE_TESTS",
+          detail: null,
+        });
+        break;
+      case "tool_call": {
+        const tool = str(e, "tool");
+        const ok = e.ok === true;
+        rows.push({
+          ts,
+          type: ok ? (TOOL_TIMELINE_TYPE[tool] ?? "cmd") : "fail",
+          summary: `${tool} · ${str(e, "summary")}`,
+          meta: ok ? "ok" : "failed",
+          detail: null,
+        });
+        break;
+      }
+      case "test_run": {
+        const score = num(e, "score");
+        const total = num(e, "total");
+        rows.push({
+          ts,
+          type: score === total && total > 0 ? "test" : "fail",
+          summary: `Test run · ${score}/${total} on ${str(e, "source")} suite`,
+          meta: `${score}/${total}`,
+          detail: Array.isArray(e.failing) && e.failing.length > 0
+            ? `Failing: ${(e.failing as unknown[]).join(", ")}`
+            : "All cases passed",
+        });
+        break;
+      }
+      case "score_improved":
+        rows.push({
+          ts,
+          type: "decide",
+          summary: `New best score · ${num(e, "score")}/${num(e, "total")}`,
+          meta: `best ${num(e, "bestScore")}`,
+          detail: null,
+        });
+        break;
+      case "error":
+        rows.push({
+          ts,
+          type: "error",
+          summary: str(e, "what") || "Agent error",
+          meta: str(e, "errorType"),
+          detail: null,
+        });
+        break;
+      // model_call / self_tests_seeded are intentionally not surfaced as rows —
+      // their totals show in the run stats instead of flooding the feed.
+    }
+  }
+  // human-intervention rows come from human_interventions.log (see buildTimeline caller)
+  return rows.reverse();
+}
+
+/** Human-intervention timeline rows, parsed from the real log file. */
+function humanTimeline(humanLog: string): TimelineEvent[] {
+  const rows: TimelineEvent[] = [];
+  // Entries look like: "[YYYY-MM-DD HH:MM:SS] TYPE" followed by detail lines.
+  const re = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+(.+)$/;
+  const lines = humanLog.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i]?.match(re);
+    if (!m) continue;
+    const detail: string[] = [];
+    for (let j = i + 1; j < lines.length && lines[j] && !re.test(lines[j] ?? ""); j++) {
+      if ((lines[j] ?? "").trim()) detail.push(lines[j] ?? "");
+    }
+    rows.push({
+      ts: m[1] ?? "",
+      type: "human",
+      summary: detail[0] ? detail[0].replace(/^What happened:\s*/i, "") : (m[2] ?? "Intervention"),
+      meta: (m[2] ?? "").toLowerCase(),
+      detail: detail.join("\n") || null,
+    });
+  }
+  return rows;
+}
+
+/** Live workspace listing — the files the agent actually created / edited. */
+function buildFiles(events: RunEvent[], workspaceDir: string): WorkspaceFile[] {
+  if (!existsSync(workspaceDir)) return [];
+
+  const skip = new Set([".git", "node_modules", "__pycache__", ".venv", "dist"]);
+  const rels: string[] = [];
+  const walk = (dir: string, prefix: string) => {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (skip.has(name) || name.startsWith(".")) continue;
+      const full = join(dir, name);
+      const rel = prefix ? `${prefix}/${name}` : name;
+      let st: Stats;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(full, rel);
+      else if (st.isFile()) rels.push(rel);
+    }
+  };
+  walk(workspaceDir, "");
+  rels.sort((a, b) => a.localeCompare(b));
+
+  // Count write / edit tool calls per file to label created vs edited.
+  const editHits = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== "tool_call") continue;
+    const tool = str(e, "tool");
+    if (tool !== "write_file" && tool !== "edit_file") continue;
+    const summary = str(e, "summary");
+    for (const rel of rels) {
+      const base = rel.split("/").pop() ?? rel;
+      if (summary.includes(base)) {
+        editHits.set(rel, (editHits.get(rel) ?? 0) + (tool === "edit_file" ? 2 : 1));
+      }
+    }
+  }
+
+  const files: WorkspaceFile[] = [];
+  for (const rel of rels) {
+    let content = "";
+    try {
+      content = Bun.file(join(workspaceDir, rel)).size > 256_000
+        ? "(file too large to display)"
+        : "";
+    } catch {
+      content = "";
+    }
+    files.push({
+      path: rel,
+      status: (editHits.get(rel) ?? 0) >= 2 ? "edited" : "created",
+      added: 0,
+      removed: 0,
+      hasSnapshot: false,
+      rolledBack: false,
+      content,
+    });
+  }
+  return files;
+}
+
+/** Fill in file contents + line counts (async, kept out of the sync walk). */
+async function hydrateFiles(files: WorkspaceFile[], workspaceDir: string): Promise<void> {
+  for (const f of files) {
+    if (f.content) continue; // already flagged too-large
+    const text = await readText(join(workspaceDir, f.path));
+    f.content = text;
+    f.added = text.trim() ? text.replace(/\n$/, "").split("\n").length : 0;
+  }
+}
+
+function defaultManifest(model: string): Manifest {
+  return {
+    primary_model: model || "qwen2.5-coder:7b",
+    provider: "Ollama",
+    additional_models: [],
+    paid_usage: { paid_inference: false, paid_apis: false, paid_tools: false },
+    hardware: hardwareLabel(),
+    offline: true,
+  };
+}
+
+function hardwareLabel(): string {
+  const cpu = cpus()[0]?.model ?? "unknown CPU";
+  const gb = Math.round(totalmem() / 1024 ** 3);
+  return `${cpu} · ${gb} GB · ${process.platform} ${process.arch}`;
+}
+
+interface ManifestFile {
+  primary_model?: string;
+  provider?: string;
+  additional_models?: string[];
+  paid_frontier_models_used_after_spec_release?: boolean;
+  institutional_or_work_model_quota_used_after_spec_release?: boolean;
+  copilot_or_paid_ide_assistant_used_after_spec_release?: boolean;
+}
+
+/** Read the real agent_manifest.json, mapping its disclosure fields. */
+async function buildManifest(model: string): Promise<Manifest> {
+  const candidates = [join(OUT_DIR, "agent_manifest.json"), join(AGENT_DIR, "agent_manifest.json")];
+  for (const path of candidates) {
+    const raw = await readText(path);
+    if (!raw.trim()) continue;
+    try {
+      const m = JSON.parse(raw) as ManifestFile;
+      return {
+        primary_model: m.primary_model || model || "qwen2.5-coder:7b",
+        provider: m.provider || "Ollama",
+        additional_models: m.additional_models ?? [],
+        paid_usage: {
+          paid_inference: m.paid_frontier_models_used_after_spec_release ?? false,
+          paid_apis: m.institutional_or_work_model_quota_used_after_spec_release ?? false,
+          paid_tools: m.copilot_or_paid_ide_assistant_used_after_spec_release ?? false,
+        },
+        hardware: hardwareLabel(),
+        offline: (m.provider ?? "Ollama").toLowerCase() === "ollama",
+      };
+    } catch {
+      // fall through to the next candidate / default
+    }
+  }
+  return defaultManifest(model);
+}
+
+/** Submission-readiness checklist, derived from real artifacts on disk. */
+function buildChecklist(
+  events: RunEvent[],
+  state: StateFile | null,
+  scores: ScorePoint[],
+  logs: Logs,
+  manifest: Manifest,
+  reportExists: boolean,
+  manifestExists: boolean,
+): ChecklistItem[] {
+  const runStart = events.find((e) => e.type === "run_start");
+  const plan = events.find((e) => e.type === "plan");
+  const selfTests = events.find((e) => e.type === "self_tests");
+  const interventionLines = (logs["human_interventions.log"] ?? []).filter((l) =>
+    /^\[\d{4}-\d{2}-\d{2}/.test(l),
+  ).length;
+  const noPaid =
+    !manifest.paid_usage.paid_inference &&
+    !manifest.paid_usage.paid_apis &&
+    !manifest.paid_usage.paid_tools;
+  const last = scores.at(-1);
+
+  return [
+    {
+      label: "Specification loaded",
+      ok: !!runStart,
+      warn: false,
+      meta: runStart ? str(runStart, "spec") : "no run yet",
+    },
+    {
+      label: "Implementation plan produced",
+      ok: !!plan,
+      warn: false,
+      meta: plan ? `${num(plan, "steps")} steps` : "pending",
+    },
+    {
+      label: "Spec-derived tests generated",
+      ok: !!selfTests,
+      warn: false,
+      meta: selfTests ? `${num(selfTests, "count")} cases` : "pending",
+    },
+    {
+      label: "Public test run recorded",
+      ok: scores.length > 0,
+      warn: false,
+      meta: last ? `${scores.length} runs · last ${last.score}/${last.total}` : "no runs",
+    },
+    {
+      label: "Final report generated",
+      ok: reportExists,
+      warn: !reportExists,
+      meta: reportExists ? "final_report.md" : "not generated",
+    },
+    {
+      label: "Model manifest present",
+      ok: manifestExists,
+      warn: !manifestExists,
+      meta: manifestExists ? "agent_manifest.json" : "using defaults",
+    },
+    {
+      label: "Interventions log present",
+      ok: !!logs["human_interventions.log"],
+      warn: false,
+      meta: `${interventionLines} logged ${interventionLines === 1 ? "entry" : "entries"}`,
+    },
+    {
+      label: "No paid models after spec release",
+      ok: noPaid && manifestExists,
+      warn: !manifestExists,
+      meta: noPaid ? "all disclosures NO" : "paid usage flagged",
+    },
+    {
+      label: "Run completed",
+      ok: state?.phase === "DONE",
+      warn: !state || (state.phase !== "DONE" && state.phase !== "FAILED"),
+      meta: state ? `phase ${state.phase}` : "not started",
+    },
+  ];
+}
+
+// ---------- live agent process ----------
+
+interface AgentProcess {
+  proc: Bun.Subprocess;
+  paused: boolean;
+}
+
+// Stash on globalThis so the reference survives `bun --hot` reloads.
+const procSlot = globalThis as typeof globalThis & { __needleAgentProc?: AgentProcess | null };
+
+function liveProc(): AgentProcess | null {
+  const p = procSlot.__needleAgentProc;
+  if (!p) return null;
+  // exitCode stays null while the process runs — including while SIGSTOP-paused.
+  if (p.proc.exitCode !== null) {
+    procSlot.__needleAgentProc = null;
+    return null;
+  }
+  return p;
+}
+
+// ---------- snapshot assembly ----------
+
+function nextDeadline(): string {
+  const override = process.env.NEEDLE_DEADLINE;
+  if (override && !Number.isNaN(new Date(override).getTime())) {
+    return new Date(override).toISOString();
+  }
+  // Default: the upcoming Friday at 12:00 local time.
+  const d = new Date();
+  const daysToFri = (5 - d.getDay() + 7) % 7;
+  d.setDate(d.getDate() + daysToFri);
+  d.setHours(12, 0, 0, 0);
+  if (d.getTime() < Date.now()) d.setDate(d.getDate() + 7);
+  return d.toISOString();
+}
+
+function buildRun(state: StateFile | null, runStart: RunEvent | undefined, lastTs: string | null): RunState {
+  const proc = liveProc();
+  return {
+    phase: state?.phase ?? null,
+    iteration: state?.iteration ?? 0,
+    maxIterations: state?.maxIterations ?? (runStart ? num(runStart, "maxIterations") : 0),
+    startedAt: runStart?.ts ?? null,
+    completedAt: state?.done ? (state.updatedAt ?? lastTs) : null,
+    model: runStart ? str(runStart, "model") : "",
+    running: proc !== null,
+    paused: proc?.paused ?? false,
+    stuck: (state?.noImprovementStreak ?? 0) >= 3,
+  };
+}
+
+export async function getSnapshot(): Promise<AgentSnapshot> {
+  const [events, state] = await Promise.all([readRunEvents(), readState()]);
+  const runStart = events.find((e) => e.type === "run_start");
+
+  // Logs — the seven required files.
+  const logs: Logs = {};
+  await Promise.all(
+    LOG_FILES.map(async (name) => {
+      const raw = await readText(join(OUT_DIR, name));
+      if (raw) logs[name] = raw.replace(/\n$/, "").split("\n");
+    }),
+  );
+
+  const scores = buildScores(events);
+  const timeline = [
+    ...humanTimeline(logs["human_interventions.log"]?.join("\n") ?? ""),
+    ...buildTimeline(events),
+  ].sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+
+  const workspaceDir = runStart ? str(runStart, "workspace") || DEFAULT_WORKSPACE : DEFAULT_WORKSPACE;
+  const files = buildFiles(events, workspaceDir);
+  await hydrateFiles(files, workspaceDir);
+
+  const model = runStart ? str(runStart, "model") : "";
+  const manifestExists =
+    existsSync(join(OUT_DIR, "agent_manifest.json")) || existsSync(join(AGENT_DIR, "agent_manifest.json"));
+  const manifest = await buildManifest(model);
+
+  const report = await readText(join(OUT_DIR, "final_report.md"));
+  const reportExists = report.trim().length > 0;
+
+  const stats: RunStats = {
+    modelCalls: state?.modelCalls ?? 0,
+    toolCalls: state?.toolCalls ?? 0,
+    inputTokens: state?.totalInputTokens ?? 0,
+    outputTokens: state?.totalOutputTokens ?? 0,
+    errors: state?.errors ?? 0,
+  };
+
+  const lastTs = events.at(-1)?.ts ?? null;
+
+  return {
+    run: buildRun(state, runStart, lastTs),
+    stats,
+    scores,
+    timeline,
+    logs,
+    files,
+    manifest,
+    checklist: buildChecklist(events, state, scores, logs, manifest, reportExists, manifestExists),
+    report: reportExists ? report : null,
+    deadline: nextDeadline(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+// ---------- operator actions ----------
+
+function stamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `[${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`;
+}
+
+/** Append text to a real log file under .needle-agent/, creating it if needed. */
+async function appendLog(name: string, text: string): Promise<void> {
+  const path = join(OUT_DIR, name);
+  const existing = await readText(path);
+  await Bun.write(path, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${text}\n`);
+}
+
+export async function logIntervention(entry: InterventionInput): Promise<AgentSnapshot> {
+  const lines = [
+    `${stamp()} ${entry.type.toUpperCase()}`,
+    `What happened: ${entry.what}`,
+    `Why: ${entry.why}`,
+    `Files or settings affected: ${entry.files || "(none)"}`,
+    `Touched final task code: ${entry.touched ? "YES" : "NO"}`,
+  ];
+  if (entry.notes.trim()) lines.push(`Notes: ${entry.notes.trim()}`);
+
+  const path = join(OUT_DIR, "human_interventions.log");
+  let existing = await readText(path);
+  // Drop the "no interventions" sentinel once a real entry is recorded.
+  existing = existing.replace(/^No human interventions after hidden task release\.\s*$/m, "").trimEnd();
+  await Bun.write(path, `${existing}\n\n${lines.join("\n")}\n`);
+
+  return getSnapshot();
+}
+
+const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
+const AGENT_MODEL = process.env.AGENT_MODEL ?? "qwen2.5-coder:7b";
+
+interface OllamaChatResponse {
+  message?: { content?: string };
+}
+
+/** Ask the real local model how it will handle an operator nudge. */
+async function askAgent(prompt: string, context: string, model: string): Promise<PromptResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        stream: false,
+        keep_alive: "30m",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an autonomous coding agent being observed in an operator console. " +
+              "An operator just sent you a nudge. Reply in first person, 2-4 sentences, " +
+              "describing concretely how you will act on it at the next iteration boundary. " +
+              `Current run context: ${context}`,
+          },
+          { role: "user", content: prompt },
+        ],
+        options: { temperature: 0.2 },
+      }),
+    });
+    if (!res.ok) {
+      return {
+        reply: `Prompt logged to prompts.log. The model could not be reached (Ollama HTTP ${res.status}); the running agent will still pick this up from the log on its next iteration.`,
+        model: "unavailable",
+      };
+    }
+    const data = (await res.json()) as OllamaChatResponse;
+    const reply = data.message?.content?.trim();
+    return {
+      reply:
+        reply ||
+        "Prompt logged to prompts.log. The agent will incorporate it at the next iteration boundary.",
+      model,
+    };
+  } catch {
+    return {
+      reply: `Prompt logged to prompts.log. Ollama is not reachable at ${OLLAMA_URL}, so no live reply was generated — the running agent will still read this nudge from the log on its next iteration.`,
+      model: "unavailable",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function sendPrompt(input: PromptInput): Promise<{ snapshot: AgentSnapshot; result: PromptResult }> {
+  const state = await readState();
+  const events = await readRunEvents();
+  const runStart = events.find((e) => e.type === "run_start");
+  const model = runStart ? str(runStart, "model") || AGENT_MODEL : AGENT_MODEL;
+
+  const oneLine = input.text.replace(/\s+/g, " ").trim();
+  await appendLog("prompts.log", `${stamp()} PROMPT (phase=operator)\n${input.text}\n`);
+
+  if (input.intervention) {
+    const truncated = oneLine.length > 140 ? `${oneLine.slice(0, 137)}...` : oneLine;
+    await logIntervention({
+      type: "nudge",
+      what: `Operator sent a live prompt to the agent: "${truncated}"`,
+      why: "Operator-initiated strategy nudge during the run.",
+      files: "",
+      touched: false,
+      notes: "Recorded automatically from the Prompt Agent console.",
+    });
+  }
+
+  const scores = buildScores(events);
+  const last = scores.at(-1);
+  const context = [
+    `phase=${state?.phase ?? "unknown"}`,
+    `iteration=${state?.iteration ?? 0}/${state?.maxIterations ?? 0}`,
+    `score=${last ? `${last.score}/${last.total}` : "n/a"}`,
+    last && last.failingCategories.length
+      ? `failing=${last.failingCategories.map((c) => c.name).slice(0, 4).join(", ")}`
+      : "failing=none",
+  ].join(" ");
+
+  const result = await askAgent(input.text, context, model);
+  return { snapshot: await getSnapshot(), result };
+}
+
+function buildReport(snap: AgentSnapshot): string {
+  const last = snap.scores.at(-1);
+  const peak = snap.scores.reduce((m, s) => Math.max(m, s.score), 0);
+  const regressions = snap.scores.filter((s) => s.regressed).length;
+  const progression =
+    snap.scores.map((s) => `- iter ${s.iter} · ${s.timestamp} — ${s.score}/${s.total}`).join("\n") ||
+    "- No test runs recorded.";
+  const failing = last?.failingCategories.length
+    ? last.failingCategories.map((c) => `- ${c.name} (${c.count})`).join("\n")
+    : "- None — all tracked cases passing.";
+  const interventions = (snap.logs["human_interventions.log"] ?? []).filter((l) =>
+    /^\[\d{4}-\d{2}-\d{2}/.test(l),
+  ).length;
+
+  return `# Final Report
+
+Generated: ${new Date().toISOString()}
+
+## Result
+
+- Final phase: ${snap.run.phase ?? "not started"}
+- Iterations: ${snap.run.iteration} / ${snap.run.maxIterations}
+- Public test score: ${last ? `${last.score}/${last.total}` : "N/A"}
+- Best score: ${peak}
+- Regressions observed: ${regressions}
+- Model: ${snap.manifest.primary_model} via ${snap.manifest.provider}
+
+## Score progression
+
+${progression}
+
+## Remaining failing categories
+
+${failing}
+
+## Run statistics
+
+- Model calls: ${snap.stats.modelCalls}
+- Tool calls: ${snap.stats.toolCalls}
+- Tokens: ${snap.stats.inputTokens} in / ${snap.stats.outputTokens} out
+- Errors: ${snap.stats.errors}
+- Human interventions logged: ${interventions}
+
+## Workspace
+
+${snap.files.map((f) => `- ${f.path} (${f.status}, ${f.added} lines)`).join("\n") || "- No files in the workspace."}
+
+## Disclosure
+
+- Paid inference: ${snap.manifest.paid_usage.paid_inference ? "YES" : "NO"}
+- Paid APIs: ${snap.manifest.paid_usage.paid_apis ? "YES" : "NO"}
+- Paid tools / IDE assistants: ${snap.manifest.paid_usage.paid_tools ? "YES" : "NO"}
+- Hardware: ${snap.manifest.hardware}
+`;
+}
+
+export async function regenerateReport(): Promise<AgentSnapshot> {
+  const snap = await getSnapshot();
+  await Bun.write(join(OUT_DIR, "final_report.md"), buildReport(snap));
+  return getSnapshot();
+}
+
+// ---------- run controls ----------
+
+function startAgent(): void {
+  if (liveProc()) return; // already running
+
+  // Start a clean run: drop the previous run's structured artifacts so the
+  // console reflects only this run. Human interventions and the manifest are
+  // kept — they are submission artifacts, not per-run state.
+  for (const f of ["run.jsonl", "state.json", "decisions.log", "commands.log", "test_runs.log", "errors.log", "prompts.log"]) {
+    const p = join(OUT_DIR, f);
+    if (existsSync(p)) {
+      try {
+        rmSync(p);
+      } catch {
+        // best effort — the agent recreates these on start
+      }
+    }
+  }
+
+  const spec = process.env.AGENT_SPEC ?? "SPEC-pwgen.md";
+  const proc = Bun.spawn({
+    cmd: ["bun", "run", "src/main.ts", "--spec", spec],
+    cwd: AGENT_DIR,
+    stdout: "inherit",
+    stderr: "inherit",
+    env: process.env,
+  });
+  const tracked: AgentProcess = { proc, paused: false };
+  procSlot.__needleAgentProc = tracked;
+  void proc.exited.then(() => {
+    if (procSlot.__needleAgentProc === tracked) procSlot.__needleAgentProc = null;
+  });
+}
+
+export async function control(action: ControlAction): Promise<AgentSnapshot> {
+  const proc = liveProc();
   switch (action) {
     case "start":
-      current = buildScenario("climbing");
+      startAgent();
       break;
     case "pause":
-      current = { ...current, run: { ...current.run, paused: true } };
+      if (proc) {
+        proc.proc.kill("SIGSTOP");
+        proc.paused = true;
+      }
       break;
     case "resume":
-      current = { ...current, run: { ...current.run, paused: false } };
+      if (proc) {
+        proc.proc.kill("SIGCONT");
+        proc.paused = false;
+      }
       break;
     case "stop":
-      current = {
-        ...current,
-        run: { ...current.run, running: false, paused: false, phase: "DONE" },
-      };
+      if (proc) {
+        if (proc.paused) proc.proc.kill("SIGCONT"); // can't terminate a stopped process
+        proc.proc.kill("SIGTERM");
+        procSlot.__needleAgentProc = null;
+      }
       break;
   }
-  return withMeta();
-}
-
-export function logIntervention(entry: InterventionInput): AgentSnapshot {
-  const ts = fmtTsLong(new Date());
-  const logLine =
-    `${ts} [${entry.type}] ${entry.what}. Reason: ${entry.why}.` +
-    `${entry.files ? ` Files affected: ${entry.files}.` : ""}` +
-    ` Final-program code touched: ${entry.touched ? "YES" : "NO"}.` +
-    `${entry.notes ? ` Notes: ${entry.notes}` : ""}`;
-
-  const event: TimelineEvent = {
-    ts,
-    type: "human",
-    summary: `Human intervention: ${entry.what}`,
-    meta: entry.type,
-    detail:
-      `Type: ${entry.type}\nReason: ${entry.why}\n` +
-      `Files affected: ${entry.files || "(none)"}\n` +
-      `Touched final program code: ${entry.touched ? "YES" : "NO"}` +
-      `${entry.notes ? `\nNotes: ${entry.notes}` : ""}`,
-  };
-
-  current = {
-    ...current,
-    logs: {
-      ...current.logs,
-      "human_interventions.log": [...(current.logs["human_interventions.log"] ?? []), logLine],
-    },
-    timeline: [event, ...current.timeline],
-  };
-  return withMeta();
-}
-
-export function sendPrompt(input: PromptInput): { snapshot: AgentSnapshot; result: PromptResult } {
-  const ts = fmtTsLong(new Date());
-  const oneLine = input.text.replace(/\s+/g, " ").trim();
-  const truncated = oneLine.length > 110 ? `${oneLine.slice(0, 107)}...` : oneLine;
-
-  const logs: Record<string, string[]> = {
-    ...current.logs,
-    "prompts.log": [...(current.logs["prompts.log"] ?? []), `${ts} [operator] ${oneLine}`],
-  };
-  if (input.intervention) {
-    logs["human_interventions.log"] = [
-      ...(current.logs["human_interventions.log"] ?? []),
-      `${ts} [nudge] Operator sent prompt to agent: "${truncated}". Final-program code touched: NO.`,
-    ];
-  }
-
-  const event: TimelineEvent = {
-    ts,
-    type: "human",
-    summary: `Operator prompt: ${truncated}`,
-    meta: input.intervention ? "nudge - logged" : "nudge",
-    detail: `Prompt:\n${input.text}\n\nLogged as intervention: ${input.intervention ? "YES" : "NO"}`,
-  };
-
-  current = { ...current, logs, timeline: [event, ...current.timeline] };
-
-  const result: PromptResult = {
-    reply: cannedReply(input.text),
-    model: current.run.model || "qwen2.5-coder:32b",
-  };
-  return { snapshot: withMeta(), result };
-}
-
-export function regenerateReport(): AgentSnapshot {
-  current = { ...current, report: current.report ?? synthReport(current) };
-  return withMeta();
-}
-
-// ---------- canned agent replies ----------
-// Stands in for a live model: terse, decisive, first-person, keyword-routed.
-// Replace with a local Ollama call once the agent backend is wired.
-
-const REPLIES: { match: RegExp; reply: string }[] = [
-  {
-    match: /roll ?back|revert|undo/i,
-    reply:
-      "Acknowledged. Rolling back the last edit to the prior snapshot, then re-running the public suite to confirm we recover the previous score. One iteration to verify before I try a different approach.",
-  },
-  {
-    match: /model|14b|smaller|faster/i,
-    reply:
-      "Switching the primary model for the next few iterations and logging the swap to decisions.log. I'll compare the score delta after 3 iterations and revert if the smaller model underperforms.",
-  },
-  {
-    match: /edge[ _-]?case/i,
-    reply:
-      "Re-prioritizing onto the edge_cases cluster. I'll enumerate the failing inputs first, propose a guard strategy, then implement. Estimate 2 iterations to move the cluster.",
-  },
-  {
-    match: /re-?plan|re-?read|plan from scratch|fresh plan/i,
-    reply:
-      "Pausing code work. Re-reading spec.md and drafting a fresh top-level plan in 3-5 bullets before touching any files. One iteration of pure planning, no edits.",
-  },
-  {
-    match: /refactor/i,
-    reply:
-      "Understood. I'll draft a refactor proposal for src/eval.py first - structure and rationale only, no code - so we can decide before committing iterations to it.",
-  },
-  {
-    match: /highest|next step|next change|priorit/i,
-    reply:
-      "Given the remaining time and the current failing clusters, the highest-EV move is the error_handling cluster: 8 failures, a low-risk structured-error change. Targeting that next.",
-  },
-];
-
-function cannedReply(text: string): string {
-  for (const { match, reply } of REPLIES) {
-    if (match.test(text)) return reply;
-  }
-  return "Acknowledged. Will apply on the next iteration boundary. Estimating 2 iterations to evaluate impact; I'll revert if the score drops more than 5.";
+  return getSnapshot();
 }

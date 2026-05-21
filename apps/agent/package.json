@@ -5,6 +5,7 @@
   "main": "src/main.ts",
   "scripts": {
     "start": "bun run src/main.ts",
+    "tui": "bun run src/tui.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

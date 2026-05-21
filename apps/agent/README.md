@@ -47,6 +47,17 @@ bun run start --spec <path/to/SPEC.md> --workspace ./solution
 
 Flags: `--dry-run` (one phase, then stop), `--max-iter N`, `--log-dir <dir>`.
 
+## Prompt The Live Agent
+
+Open a minimal terminal UI against the current run log directory:
+
+```bash
+bun run tui --log-dir ../../.needle-agent
+```
+
+Type a line and press Enter to queue it for the next model turn. Use `/status`
+to refresh the current phase and `/quit` to exit the TUI.
+
 ## Output
 
 All run data is written to `.needle-agent/` at the monorepo root (override

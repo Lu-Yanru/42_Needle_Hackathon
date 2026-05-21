@@ -1,6 +1,6 @@
 // Top-row panels: StatusBar, ScoreChart, FailingCategories, SubmissionChecklist.
 
-import type { ChecklistItem, ControlAction, RunState, Scenario, ScorePoint } from "@needle-agent/api/agent/types";
+import type { ChecklistItem, ControlAction, RunState, RunStats, ScorePoint } from "@needle-agent/api/agent/types";
 import { Area, AreaChart, CartesianGrid, ReferenceDot, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { formatCountdown, formatElapsed, formatRelativeMs, useTicker } from "./format";

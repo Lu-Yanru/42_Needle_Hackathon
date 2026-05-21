@@ -36,6 +36,7 @@ import { createTools, FINISH_PHASE, type ToolContext } from "./tools/index";
 import type { AnyTool } from "./tools/types";
 import { truncateHead } from "./truncate";
 import { Workspace } from "./workspace";
+import { drainOperatorPrompts } from "./operator";
 
 /** Zero token usage — recorded when a model call fails before producing output. */
 const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -319,6 +320,26 @@ async function doModelPhase(
   await events.emit("phase_start", { phase: state.phase, iteration: state.iteration });
 
   const files = await renderFiles(workspace, state.plan.entrypoint);
+  const operatorPrompts = await drainOperatorPrompts(logger.dir);
+  const operatorSection =
+    operatorPrompts.length === 0
+      ? ""
+      : `\n\nOPERATOR NUDGES\n${operatorPrompts
+          .map((prompt, index) => `${index + 1}. ${prompt.text}`)
+          .join("\n")}\nTreat these as high-priority instructions unless they conflict with the specification.\n`;
+  for (const prompt of operatorPrompts) {
+    await logger.prompt("OPERATOR", prompt.text);
+    if (prompt.intervention) {
+      await logger.humanIntervention(
+        `Operator prompt queued for next model turn.\nPrompt: ${prompt.text}\nTouched final task code: NO`,
+      );
+    }
+    await events.emit("operator_prompt", {
+      phase: state.phase,
+      text: prompt.text.slice(0, 200),
+      intervention: prompt.intervention,
+    });
+  }
   let userPrompt: string;
   if (state.phase === "IMPLEMENTING") {
     userPrompt = prompts.implementingPrompt(state.plan, files, state.verificationCommands);
@@ -334,6 +355,7 @@ async function doModelPhase(
         ? prompts.stuckPrompt(state.plan, failureSignal, files, state.verificationCommands)
         : prompts.fixingPrompt(state.plan, failureSignal, files, state.verificationCommands);
   }
+  userPrompt += operatorSection;
   await logger.prompt(state.phase, userPrompt);
 
   const actionFormat = z.toJSONSchema(ActionSchema);
