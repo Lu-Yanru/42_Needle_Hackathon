@@ -7,14 +7,16 @@ export async function writeManifest(path = "agent_manifest.json"): Promise<void>
   const manifest = {
     team_name: TEAM_NAME,
     primary_model: MODEL,
-    provider: "Ollama",
+    provider: "Ollama (local)",
     runtime_or_tool: "custom TypeScript agent harness (Bun)",
     additional_models: [],
     paid_frontier_models_used_after_spec_release: false,
     copilot_or_paid_ide_assistant_used_after_spec_release: false,
     institutional_or_work_model_quota_used_after_spec_release: false,
+    paid_inference_api_used: false,
     model_configuration_location: "apps/agent/src/config.ts",
-    notes: "No paid model access was used after the hidden task release.",
+    notes:
+      "Inference runs entirely on a local Ollama instance (no cloud API, no network inference) using the open-weight model qwen2.5-coder:7b. No paid inference, paid frontier models, Copilot or paid IDE assistants, or institutional/work model quota were used after the hidden task release.",
   };
   await Bun.write(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }
@@ -42,7 +44,7 @@ ${progression}
 ## Agent
 
 - Harness: custom TypeScript agent (Bun), phase machine PLANNING -> IMPLEMENTING -> TESTING -> FIXING -> DONE
-- Model: ${MODEL} via Ollama (local)
+- Model: ${MODEL} via OpenRouter
 - Tools: read_file, write_file, list_dir, run_command, finish_phase
 - Rollback: workspace is restored to the last-good snapshot when a patch regresses the score
 

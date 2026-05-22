@@ -10,9 +10,21 @@
 // Operator actions write back to the same real files and, for run controls,
 // spawn / signal the actual agent process.
 
-import { existsSync, readdirSync, rmSync, statSync, type Stats } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  type Stats,
+} from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { dirname, join } from "node:path";
+
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { generateText } from "ai";
 
 import type {
   AgentSnapshot,
@@ -28,6 +40,7 @@ import type {
   RunState,
   RunStats,
   ScorePoint,
+  SessionSummary,
   TimelineEvent,
   TimelineType,
   WorkspaceFile,
@@ -62,6 +75,20 @@ const LOG_FILES = [
   "human_interventions.log",
 ] as const;
 
+/** Where finished runs are archived — one folder per session. */
+const SESSIONS_DIR = join(OUT_DIR, "sessions");
+
+/** Per-run artifact files copied into a session folder when it is archived. */
+const ARCHIVE_FILES = [
+  "run.jsonl",
+  "state.json",
+  "checkpoint.json",
+  "operator-prompts.jsonl",
+  "agent_manifest.json",
+  "final_report.md",
+  ...LOG_FILES,
+] as const;
+
 // ---------- low-level file readers ----------
 
 async function readText(path: string): Promise<string> {
@@ -77,8 +104,8 @@ interface RunEvent {
 }
 
 /** Parse run.jsonl into ordered events; bad lines are skipped, not fatal. */
-async function readRunEvents(): Promise<RunEvent[]> {
-  const raw = await readText(join(OUT_DIR, "run.jsonl"));
+async function readRunEvents(dir = OUT_DIR): Promise<RunEvent[]> {
+  const raw = await readText(join(dir, "run.jsonl"));
   const events: RunEvent[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -109,8 +136,8 @@ interface StateFile {
   done: boolean;
 }
 
-async function readState(): Promise<StateFile | null> {
-  const raw = await readText(join(OUT_DIR, "state.json"));
+async function readState(dir = OUT_DIR): Promise<StateFile | null> {
+  const raw = await readText(join(dir, "state.json"));
   if (!raw.trim()) return null;
   try {
     return JSON.parse(raw) as StateFile;
@@ -384,12 +411,12 @@ async function hydrateFiles(files: WorkspaceFile[], workspaceDir: string): Promi
 
 function defaultManifest(model: string): Manifest {
   return {
-    primary_model: model || "qwen2.5-coder:7b",
-    provider: "Ollama",
+    primary_model: model || "openai/gpt-oss-120b",
+    provider: "OpenRouter",
     additional_models: [],
-    paid_usage: { paid_inference: false, paid_apis: false, paid_tools: false },
+    paid_usage: { paid_inference: true, paid_apis: false, paid_tools: false },
     hardware: hardwareLabel(),
-    offline: true,
+    offline: false,
   };
 }
 
@@ -406,27 +433,28 @@ interface ManifestFile {
   paid_frontier_models_used_after_spec_release?: boolean;
   institutional_or_work_model_quota_used_after_spec_release?: boolean;
   copilot_or_paid_ide_assistant_used_after_spec_release?: boolean;
+  paid_inference_api_used?: boolean;
 }
 
 /** Read the real agent_manifest.json, mapping its disclosure fields. */
-async function buildManifest(model: string): Promise<Manifest> {
-  const candidates = [join(OUT_DIR, "agent_manifest.json"), join(AGENT_DIR, "agent_manifest.json")];
+async function buildManifest(model: string, dir = OUT_DIR): Promise<Manifest> {
+  const candidates = [join(dir, "agent_manifest.json"), join(AGENT_DIR, "agent_manifest.json")];
   for (const path of candidates) {
     const raw = await readText(path);
     if (!raw.trim()) continue;
     try {
       const m = JSON.parse(raw) as ManifestFile;
       return {
-        primary_model: m.primary_model || model || "qwen2.5-coder:7b",
-        provider: m.provider || "Ollama",
+        primary_model: m.primary_model || model || "openai/gpt-oss-120b",
+        provider: m.provider || "OpenRouter",
         additional_models: m.additional_models ?? [],
         paid_usage: {
-          paid_inference: m.paid_frontier_models_used_after_spec_release ?? false,
+          paid_inference: m.paid_inference_api_used ?? false,
           paid_apis: m.institutional_or_work_model_quota_used_after_spec_release ?? false,
           paid_tools: m.copilot_or_paid_ide_assistant_used_after_spec_release ?? false,
         },
         hardware: hardwareLabel(),
-        offline: (m.provider ?? "Ollama").toLowerCase() === "ollama",
+        offline: (m.provider ?? "OpenRouter").toLowerCase() === "ollama",
       };
     } catch {
       // fall through to the next candidate / default
@@ -558,8 +586,14 @@ function nextDeadline(): string {
   return d.toISOString();
 }
 
-function buildRun(state: StateFile | null, runStart: RunEvent | undefined, lastTs: string | null): RunState {
-  const proc = liveProc();
+function buildRun(
+  state: StateFile | null,
+  runStart: RunEvent | undefined,
+  lastTs: string | null,
+  isLive: boolean,
+): RunState {
+  // An archived session is frozen history — never live.
+  const proc = isLive ? liveProc() : null;
   // A run counts as live when we still hold its process handle, or — as a
   // restart-proof fallback — when run.jsonl is still being appended to and no
   // terminal phase has been reached. The fallback is suppressed briefly after
@@ -568,7 +602,7 @@ function buildRun(state: StateFile | null, runStart: RunEvent | undefined, lastT
   const recentlyStopped =
     procSlot.__needleStoppedAt != null && Date.now() - procSlot.__needleStoppedAt < LIVE_WINDOW_MS;
   const eventsFresh =
-    state != null && !state.done && lastEventAge < LIVE_WINDOW_MS && !recentlyStopped;
+    isLive && state != null && !state.done && lastEventAge < LIVE_WINDOW_MS && !recentlyStopped;
   return {
     phase: state?.phase ?? null,
     iteration: state?.iteration ?? 0,
@@ -582,15 +616,19 @@ function buildRun(state: StateFile | null, runStart: RunEvent | undefined, lastT
   };
 }
 
-export async function getSnapshot(): Promise<AgentSnapshot> {
-  const [events, state] = await Promise.all([readRunEvents(), readState()]);
+export async function getSnapshot(sessionId?: string): Promise<AgentSnapshot> {
+  // No sessionId => the live run in flat .needle-agent/. A sessionId => a
+  // frozen, read-only archived run under .needle-agent/sessions/<id>/.
+  const isLive = !sessionId;
+  const dir = sessionId ? join(SESSIONS_DIR, sessionId) : OUT_DIR;
+  const [events, state] = await Promise.all([readRunEvents(dir), readState(dir)]);
   const runStart = events.find((e) => e.type === "run_start");
 
   // Logs — the seven required files.
   const logs: Logs = {};
   await Promise.all(
     LOG_FILES.map(async (name) => {
-      const raw = await readText(join(OUT_DIR, name));
+      const raw = await readText(join(dir, name));
       if (raw) logs[name] = raw.replace(/\n$/, "").split("\n");
     }),
   );
@@ -601,16 +639,22 @@ export async function getSnapshot(): Promise<AgentSnapshot> {
     ...buildTimeline(events),
   ].sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
 
-  const workspaceDir = runStart ? str(runStart, "workspace") || DEFAULT_WORKSPACE : DEFAULT_WORKSPACE;
+  // An archived session keeps its workspace under <session>/workspace; a live
+  // run uses the path recorded in its run_start event.
+  const workspaceDir = sessionId
+    ? join(dir, "workspace")
+    : runStart
+      ? str(runStart, "workspace") || DEFAULT_WORKSPACE
+      : DEFAULT_WORKSPACE;
   const files = buildFiles(events, workspaceDir);
   await hydrateFiles(files, workspaceDir);
 
   const model = runStart ? str(runStart, "model") : "";
   const manifestExists =
-    existsSync(join(OUT_DIR, "agent_manifest.json")) || existsSync(join(AGENT_DIR, "agent_manifest.json"));
-  const manifest = await buildManifest(model);
+    existsSync(join(dir, "agent_manifest.json")) || existsSync(join(AGENT_DIR, "agent_manifest.json"));
+  const manifest = await buildManifest(model, dir);
 
-  const report = await readText(join(OUT_DIR, "final_report.md"));
+  const report = await readText(join(dir, "final_report.md"));
   const reportExists = report.trim().length > 0;
 
   const stats: RunStats = {
@@ -624,7 +668,7 @@ export async function getSnapshot(): Promise<AgentSnapshot> {
   const lastTs = events.at(-1)?.ts ?? null;
 
   return {
-    run: buildRun(state, runStart, lastTs),
+    run: buildRun(state, runStart, lastTs, isLive),
     stats,
     scores,
     timeline,
@@ -636,6 +680,35 @@ export async function getSnapshot(): Promise<AgentSnapshot> {
     deadline: nextDeadline(),
     updatedAt: new Date().toISOString(),
   };
+}
+
+/** Summaries of all archived sessions, newest first. */
+export async function listSessions(): Promise<SessionSummary[]> {
+  if (!existsSync(SESSIONS_DIR)) return [];
+  const ids = readdirSync(SESSIONS_DIR).filter((name) => {
+    try {
+      return statSync(join(SESSIONS_DIR, name)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  const sessions = await Promise.all(
+    ids.map(async (id): Promise<SessionSummary> => {
+      const dir = join(SESSIONS_DIR, id);
+      const [state, events] = await Promise.all([readState(dir), readRunEvents(dir)]);
+      const runStart = events.find((e) => e.type === "run_start");
+      return {
+        id,
+        phase: state?.phase ?? null,
+        iteration: state?.iteration ?? 0,
+        score: state?.lastScore ?? null,
+        total: state?.lastTotal ?? null,
+        startedAt: runStart?.ts ?? null,
+        completedAt: state?.done ? state.updatedAt : null,
+      };
+    }),
+  );
+  return sessions.sort((a, b) => (a.id < b.id ? 1 : -1));
 }
 
 // ---------- operator actions ----------
@@ -683,49 +756,34 @@ export async function logIntervention(entry: InterventionInput): Promise<AgentSn
   return getSnapshot();
 }
 
-const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-const AGENT_MODEL = process.env.AGENT_MODEL ?? "qwen2.5-coder:7b";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
+const AGENT_MODEL = process.env.AGENT_MODEL ?? "openai/gpt-oss-120b";
 
-interface OllamaChatResponse {
-  message?: { content?: string };
-}
+const openrouter = createOpenRouter({ apiKey: OPENROUTER_API_KEY });
 
-/** Best-effort live preview: ask the local model how it would act on a nudge.
- *  Only attempted when no run is active — during a run the model is saturated. */
+/** Best-effort live preview: ask the model how it would act on a nudge.
+ *  Only attempted when no run is active — during a run the model is busy. */
 async function askAgent(prompt: string, context: string, model: string): Promise<PromptResult> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45_000);
+  if (!OPENROUTER_API_KEY) {
+    return {
+      reply:
+        "Queued for the agent. No live preview was generated — OPENROUTER_API_KEY is not configured for the console — but the prompt will be applied at the next iteration.",
+      model: "",
+    };
+  }
   try {
-    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        stream: false,
-        keep_alive: "30m",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an autonomous coding agent being observed in an operator console. " +
-              "An operator just sent you a nudge. Reply in first person, 2-4 sentences, " +
-              "describing concretely how you will act on it at the next iteration boundary. " +
-              `Current run context: ${context}`,
-          },
-          { role: "user", content: prompt },
-        ],
-        options: { temperature: 0.2 },
-      }),
+    const { text } = await generateText({
+      model: openrouter(model),
+      abortSignal: AbortSignal.timeout(45_000),
+      temperature: 0.2,
+      system:
+        "You are an autonomous coding agent being observed in an operator console. " +
+        "An operator just sent you a nudge. Reply in first person, 2-4 sentences, " +
+        "describing concretely how you will act on it at the next iteration boundary. " +
+        `Current run context: ${context}`,
+      messages: [{ role: "user", content: prompt }],
     });
-    if (!res.ok) {
-      return {
-        reply: `Queued for the agent. The local model returned HTTP ${res.status}, so no live preview was generated — the prompt will still be applied at the next iteration.`,
-        model: "",
-      };
-    }
-    const data = (await res.json()) as OllamaChatResponse;
-    const reply = data.message?.content?.trim();
+    const reply = text.trim();
     return reply
       ? { reply, model }
       : {
@@ -733,15 +791,14 @@ async function askAgent(prompt: string, context: string, model: string): Promise
           model: "",
         };
   } catch (err) {
-    const aborted = err instanceof Error && err.name === "AbortError";
+    const aborted =
+      err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
     return {
       reply: aborted
-        ? "Queued for the agent. The live preview timed out — the local model did not respond in time — but the prompt is in the queue and will be applied at the next iteration."
-        : `Queued for the agent. The local model at ${OLLAMA_URL} could not be reached for a live preview; the prompt is still queued and will be applied at the next iteration.`,
+        ? "Queued for the agent. The live preview timed out — the model did not respond in time — but the prompt is in the queue and will be applied at the next iteration."
+        : "Queued for the agent. OpenRouter could not be reached for a live preview; the prompt is still queued and will be applied at the next iteration.",
       model: "",
     };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -841,14 +898,72 @@ export async function regenerateReport(): Promise<AgentSnapshot> {
 
 // ---------- run controls ----------
 
-function startAgent(): void {
+/** Session id (YYYYMMDD-HHMMSS) derived from a run's ISO start timestamp. */
+function sessionIdFromTs(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/** Copy the current run's artifacts + workspace into .needle-agent/sessions/<id>. */
+async function archiveCurrentRun(): Promise<void> {
+  const events = await readRunEvents();
+  const runStart = events.find((e) => e.type === "run_start");
+  if (!runStart) return; // no real run on disk — nothing to archive
+
+  const base = sessionIdFromTs(runStart.ts);
+  let id = base;
+  for (let n = 2; existsSync(join(SESSIONS_DIR, id)); n++) id = `${base}-${n}`;
+  const dest = join(SESSIONS_DIR, id);
+  mkdirSync(dest, { recursive: true });
+
+  for (const f of ARCHIVE_FILES) {
+    const src = join(OUT_DIR, f);
+    if (!existsSync(src)) continue;
+    try {
+      copyFileSync(src, join(dest, f));
+    } catch {
+      // best effort — a missing artifact is not fatal
+    }
+  }
+  if (existsSync(DEFAULT_WORKSPACE)) {
+    try {
+      cpSync(DEFAULT_WORKSPACE, join(dest, "workspace"), { recursive: true });
+    } catch {
+      // best effort
+    }
+  }
+}
+
+/** Relaunch the agent with --resume to continue the run still in .needle-agent/. */
+function resumeAgent(): void {
+  if (liveProc()) return; // already running
+  procSlot.__needleStoppedAt = undefined;
+  const proc = Bun.spawn({
+    cmd: ["bun", "run", "src/main.ts", "--resume"],
+    cwd: AGENT_DIR,
+    stdout: "inherit",
+    stderr: "inherit",
+    env: process.env,
+  });
+  const tracked: AgentProcess = { proc, paused: false };
+  procSlot.__needleAgentProc = tracked;
+  void proc.exited.then(() => {
+    if (procSlot.__needleAgentProc === tracked) procSlot.__needleAgentProc = null;
+  });
+}
+
+async function startAgent(): Promise<void> {
   if (liveProc()) return; // already running
   procSlot.__needleStoppedAt = undefined; // a new run clears any prior Stop
+
+  // Preserve the previous run as a session before this run overwrites it.
+  await archiveCurrentRun();
 
   // Start a clean run: drop the previous run's structured artifacts so the
   // console reflects only this run. Human interventions and the manifest are
   // kept — they are submission artifacts, not per-run state.
-  for (const f of ["run.jsonl", "state.json", "decisions.log", "commands.log", "test_runs.log", "errors.log", "prompts.log"]) {
+  for (const f of ["run.jsonl", "state.json", "checkpoint.json", "decisions.log", "commands.log", "test_runs.log", "errors.log", "prompts.log"]) {
     const p = join(OUT_DIR, f);
     if (existsSync(p)) {
       try {
@@ -878,7 +993,7 @@ export async function control(action: ControlAction): Promise<AgentSnapshot> {
   const proc = liveProc();
   switch (action) {
     case "start":
-      startAgent();
+      await startAgent();
       break;
     case "pause":
       if (proc) {
@@ -891,6 +1006,10 @@ export async function control(action: ControlAction): Promise<AgentSnapshot> {
         proc.proc.kill("SIGCONT");
         proc.paused = false;
       }
+      break;
+    case "continue":
+      // Relaunch a stopped-but-incomplete run from its checkpoint.
+      resumeAgent();
       break;
     case "stop":
       if (proc) {

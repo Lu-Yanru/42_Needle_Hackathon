@@ -39,7 +39,7 @@ export class Workspace {
 
   async fileExists(path: string): Promise<Result<boolean, FileSystemError | WorkspacePathError>> {
     const resolved = this.resolvePath(path);
-    if (resolved.isErr()) return resolved;
+    if (resolved.isErr()) return Result.err(resolved.error);
     return Result.tryPromise({
       try: () => Bun.file(resolved.value).exists(),
       catch: (cause) => new FileSystemError({ operation: "exists", path, cause }),
@@ -51,7 +51,7 @@ export class Workspace {
     content: string,
   ): Promise<Result<void, FileSystemError | WorkspacePathError>> {
     const resolved = this.resolvePath(path);
-    if (resolved.isErr()) return resolved;
+    if (resolved.isErr()) return Result.err(resolved.error);
     return Result.tryPromise({
       try: async () => {
         // Bun.write creates any missing parent directories.
@@ -68,7 +68,7 @@ export class Workspace {
     replaceAll = false,
   ): Promise<Result<number, FileSystemError | WorkspacePathError>> {
     const current = await this.readFile(path);
-    if (current.isErr()) return current;
+    if (current.isErr()) return Result.err(current.error);
     const occurrences = current.value.split(search).length - 1;
     if (occurrences < 1) {
       return Result.err(
@@ -83,7 +83,7 @@ export class Workspace {
       ? current.value.split(search).join(replace)
       : current.value.replace(search, replace);
     const written = await this.writeFile(path, next);
-    if (written.isErr()) return written;
+    if (written.isErr()) return Result.err(written.error);
     return Result.ok(replaceAll ? occurrences : 1);
   }
 
@@ -108,11 +108,11 @@ export class Workspace {
   /** Snapshot every file (path -> content). */
   async snapshot(): Promise<Result<Map<string, string>, FileSystemError | WorkspacePathError>> {
     const files = await this.listFiles();
-    if (files.isErr()) return files;
+    if (files.isErr()) return Result.err(files.error);
     const snap = new Map<string, string>();
     for (const rel of files.value) {
       const content = await this.readFile(rel);
-      if (content.isErr()) return content;
+      if (content.isErr()) return Result.err(content.error);
       snap.set(rel, content.value);
     }
     return Result.ok(snap);
@@ -123,21 +123,21 @@ export class Workspace {
     snap: Map<string, string>,
   ): Promise<Result<void, FileSystemError | WorkspacePathError>> {
     const files = await this.listFiles();
-    if (files.isErr()) return files;
+    if (files.isErr()) return Result.err(files.error);
     for (const rel of files.value) {
       if (!snap.has(rel)) {
         const resolved = this.resolvePath(rel);
-        if (resolved.isErr()) return resolved;
+        if (resolved.isErr()) return Result.err(resolved.error);
         const deleted = await Result.tryPromise({
           try: () => Bun.file(resolved.value).delete(),
           catch: (cause) => new FileSystemError({ operation: "delete", path: rel, cause }),
         });
-        if (deleted.isErr()) return deleted;
+        if (deleted.isErr()) return Result.err(deleted.error);
       }
     }
     for (const [rel, content] of snap) {
       const written = await this.writeFile(rel, content);
-      if (written.isErr()) return written;
+      if (written.isErr()) return Result.err(written.error);
     }
     return Result.ok(undefined);
   }

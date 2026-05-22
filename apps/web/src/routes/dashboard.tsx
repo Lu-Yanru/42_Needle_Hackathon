@@ -52,10 +52,16 @@ function OperatorConsole() {
   const toast = useToast();
   const queryClient = useQueryClient();
 
+  // Which run we're viewing — undefined = the live run; an id = an archived session.
+  const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(undefined);
+
   // The single source of truth — polled from the server, which reads the
-  // agent's real .needle-agent/ artifacts on every request.
-  const snapshotOpts = orpc.agent.snapshot.queryOptions();
-  const query = useQuery({ ...snapshotOpts, refetchInterval: 2500 });
+  // agent's real .needle-agent/ artifacts on every request. Archived sessions
+  // are frozen history, so they are fetched once rather than polled.
+  const snapshotOpts = orpc.agent.snapshot.queryOptions({ input: { sessionId: selectedSessionId } });
+  const query = useQuery({ ...snapshotOpts, refetchInterval: selectedSessionId ? false : 2500 });
+  const sessionsQuery = useQuery({ ...orpc.agent.listSessions.queryOptions(), refetchInterval: 8000 });
+  const sessions = sessionsQuery.data ?? [];
 
   const [view, setView] = useState<"mission" | "chat">("mission");
   const [chatUnread, setChatUnread] = useState(0);
@@ -85,6 +91,11 @@ function OperatorConsole() {
   const marker = useRef<SnapshotMarker | null>(null);
   useEffect(() => {
     if (!snapshot) return;
+    // Archived sessions are static history — don't fire live-event toasts.
+    if (selectedSessionId) {
+      marker.current = null;
+      return;
+    }
     const cur: SnapshotMarker = {
       phase: snapshot.run.phase,
       scores: snapshot.scores.length,
@@ -128,7 +139,7 @@ function OperatorConsole() {
     if (cur.errors > last.errors) {
       toast({ type: "bad", title: "Agent error logged", sub: `${cur.errors} total this run` });
     }
-  }, [snapshot, toast]);
+  }, [snapshot, toast, selectedSessionId]);
 
   const onAction = useCallback(
     async (action: ControlAction) => {
@@ -140,6 +151,8 @@ function OperatorConsole() {
           toast({ type: "warn", title: "Agent paused", sub: "SIGSTOP sent to the run" });
         } else if (action === "resume") {
           toast({ type: "ok", title: "Agent resumed", sub: "SIGCONT sent to the run" });
+        } else if (action === "continue") {
+          toast({ type: "ok", title: "Run resumed", sub: "relaunched the agent from its checkpoint" });
         } else {
           toast({ type: "bad", title: "Agent stopped", sub: "SIGTERM sent · partial results saved" });
         }
@@ -216,6 +229,9 @@ function OperatorConsole() {
         onViewChange={onViewChange}
         chatUnread={chatUnread}
         onAction={onAction}
+        sessions={sessions}
+        selectedSessionId={selectedSessionId}
+        onSelectSession={setSelectedSessionId}
       />
 
       {view === "chat" ? (

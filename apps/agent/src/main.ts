@@ -2,9 +2,11 @@
 //
 //   bun run start --spec <path/to/SPEC.md> [--workspace ./solution]
 //                 [--dry-run] [--max-iter N] [--log-dir <dir>] [--test-cmd "<cmd>"]
+//   bun run start --resume   (continue the last stopped run from checkpoint.json)
 //
-// The agent's run data (logs, run.jsonl, state.json, agent_manifest.json) is
-// written to `<monorepo-root>/.needle-agent/` unless --log-dir overrides it.
+// The agent's run data (logs, run.jsonl, state.json, checkpoint.json,
+// agent_manifest.json) is written to `<monorepo-root>/.needle-agent/` unless
+// --log-dir overrides it.
 
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -12,7 +14,8 @@ import { MAX_ITERATIONS, MODEL, TEST_COMMAND } from "./config";
 import { EventLog } from "./events";
 import { Logger } from "./logger";
 import { runAgent } from "./loop";
-import { checkOllama } from "./ollama";
+import { checkModel } from "./openrouter";
+import { loadCheckpoint } from "./checkpoint";
 import type { RunState } from "./state";
 import { buildFinalReport, writeManifest } from "./submission";
 
@@ -35,6 +38,7 @@ interface Args {
   maxIter: number;
   logDir: string;
   testCmd: string;
+  resume: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -45,6 +49,7 @@ function parseArgs(argv: string[]): Args {
     maxIter: MAX_ITERATIONS,
     logDir: "", // empty = default to <monorepo-root>/.needle-agent
     testCmd: TEST_COMMAND,
+    resume: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -54,73 +59,87 @@ function parseArgs(argv: string[]): Args {
     else if (flag === "--max-iter") args.maxIter = Number(argv[++i] ?? args.maxIter);
     else if (flag === "--log-dir") args.logDir = argv[++i] ?? args.logDir;
     else if (flag === "--test-cmd") args.testCmd = argv[++i] ?? args.testCmd;
+    else if (flag === "--resume") args.resume = true;
   }
   return args;
 }
 
 async function main(): Promise<number> {
   const args = parseArgs(Bun.argv.slice(2));
-  if (!args.spec) {
+  if (!args.spec && !args.resume) {
     console.error(
-      'usage: bun run start --spec <path/to/SPEC.md> [--workspace ./solution] [--dry-run] [--max-iter N] [--log-dir <dir>] [--test-cmd "<cmd>"]',
+      "usage: bun run start --spec <path/to/SPEC.md> [--workspace ./solution] [--dry-run]\n" +
+        '                    [--max-iter N] [--log-dir <dir>] [--test-cmd "<cmd>"] [--resume]',
     );
     return 2;
   }
 
-  const specFile = Bun.file(resolve(args.spec));
-  if (!(await specFile.exists())) {
-    console.error(`spec file not found: ${args.spec}`);
-    return 2;
+  // The agent's run data lives in .needle-agent/ at the monorepo root
+  // (override with --log-dir).
+  const outputDir = args.logDir ? resolve(args.logDir) : join(findRepoRoot(), ".needle-agent");
+
+  // Build the run state — fresh from the spec, or restored from a checkpoint
+  // when --resume continues a stopped run.
+  let state: RunState;
+  if (args.resume) {
+    const restored = await loadCheckpoint(outputDir);
+    if (!restored) {
+      console.error(`nothing to resume: no checkpoint.json under ${outputDir}`);
+      return 2;
+    }
+    state = restored;
+    console.log(`resuming run: phase=${state.phase} iteration=${state.iteration}`);
+  } else {
+    const specFile = Bun.file(resolve(args.spec));
+    if (!(await specFile.exists())) {
+      console.error(`spec file not found: ${args.spec}`);
+      return 2;
+    }
+    state = {
+      specPath: args.spec,
+      spec: await specFile.text(),
+      workspaceDir: resolve(args.workspace),
+      phase: "PLANNING",
+      plan: null,
+      iteration: 0,
+      maxIterations: args.maxIter,
+      bestScore: -1,
+      noImprovementStreak: 0,
+      planFailures: 0,
+      lastTestResult: null,
+      lastGoodSnapshot: null,
+      scoreProgression: [],
+      selfTests: [],
+      testCommand: args.testCmd,
+      testSource: "none",
+      verificationCommands: [],
+      nextVerificationIndex: 0,
+      lastRunState: null,
+      dryRun: args.dryRun,
+    };
   }
 
-  // Create the workspace up front so test-runner / run_command spawns have a
-  // valid cwd. The agent's run data lives in .needle-agent/ at the monorepo
-  // root — kept separate from the workspace (override with --log-dir).
-  const workspaceDir = resolve(args.workspace);
-  await Bun.$`mkdir -p ${workspaceDir}`.quiet().nothrow();
-  const outputDir = args.logDir ? resolve(args.logDir) : join(findRepoRoot(), ".needle-agent");
+  // The workspace must exist before test-runner / run_command spawns need it.
+  await Bun.$`mkdir -p ${state.workspaceDir}`.quiet().nothrow();
 
   const logger = await Logger.create(outputDir);
   const events = await EventLog.create(outputDir);
 
-  const ollama = await checkOllama();
-  if (ollama.isErr()) {
-    console.error(`Ollama not ready: ${ollama.error.message}`);
+  const model = await checkModel();
+  if (model.isErr()) {
+    console.error(`OpenRouter not ready: ${model.error.message}`);
     await logger.error(
-      "OLLAMA_UNAVAILABLE",
-      ollama.error.message,
+      "MODEL_UNAVAILABLE",
+      model.error.message,
       "cannot start the run",
-      "fix Ollama / pull the model",
+      "set OPENROUTER_API_KEY / check connectivity",
     );
     return 1;
   }
-  console.log(ollama.value.detail);
-
-  const state: RunState = {
-    specPath: args.spec,
-    spec: await specFile.text(),
-    workspaceDir,
-    phase: "PLANNING",
-    plan: null,
-    iteration: 0,
-    maxIterations: args.maxIter,
-    bestScore: -1,
-    noImprovementStreak: 0,
-    planFailures: 0,
-    lastTestResult: null,
-    lastGoodSnapshot: null,
-    scoreProgression: [],
-    selfTests: [],
-    testCommand: args.testCmd,
-    testSource: "none",
-    verificationCommands: [],
-    nextVerificationIndex: 0,
-    lastRunState: null,
-    dryRun: args.dryRun,
-  };
+  console.log(model.value.detail);
 
   console.log(
-    `agent: model=${MODEL} workspace=${workspaceDir} output=${outputDir} spec=${args.spec}`,
+    `agent: model=${MODEL} workspace=${state.workspaceDir} output=${outputDir} spec=${state.specPath}`,
   );
 
   try {

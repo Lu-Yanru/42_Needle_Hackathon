@@ -49,8 +49,8 @@ export class ProcessError extends TaggedError("ProcessError")<{
   }
 }
 
-/** An Ollama request failed — network, HTTP status, or timeout. */
-export class OllamaError extends TaggedError("OllamaError")<{
+/** An OpenRouter / model request failed — network, HTTP status, or timeout. */
+export class ModelError extends TaggedError("ModelError")<{
   message: string;
   cause: unknown;
 }>() {
@@ -77,5 +77,5 @@ export type AgentError =
   | FileSystemError
   | WorkspacePathError
   | ProcessError
-  | OllamaError
+  | ModelError
   | ParseError;

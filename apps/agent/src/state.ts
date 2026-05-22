@@ -27,9 +27,8 @@ const ActionBaseSchema = z.object({
 
 /**
  * One action the model takes per turn in IMPLEMENTING / FIXING.
- * Sent to Ollama as a `format` JSON schema so the response is guaranteed
- * to be a valid action object — local models do not reliably emit native
- * tool calls.
+ * Generated as schema-constrained structured output, so the response is
+ * guaranteed to be a valid action object.
  */
 export const ActionSchema = z.discriminatedUnion("tool", [
   ActionBaseSchema.extend({
@@ -67,9 +66,8 @@ export type Action = z.infer<typeof ActionSchema>;
  * directory, runs the program with `args`, and checks the captured output.
  * Expected values come from the SPECIFICATION, never from running the program.
  *
- * The schema is intentionally flat (no nested arrays of objects): Ollama's
- * grammar-constrained decoding is far slower on nested schemas, so each test
- * is generated as a single flat object.
+ * The schema is intentionally flat (no nested arrays of objects) so each test
+ * is generated and deduplicated as a single self-contained object.
  */
 export const SelfTestSchema = z.object({
   name: z.string().describe("Short label for this case"),

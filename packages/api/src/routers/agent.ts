@@ -7,12 +7,17 @@ import { publicProcedure } from "../index";
 // real run artifacts under .needle-agent/ — there is no mock data path.
 // Public for now; swap to protectedProcedure to re-gate behind auth.
 export const agentRouter = {
-  /** Live snapshot of the current run — polled by the dashboard. */
-  snapshot: publicProcedure.handler(() => store.getSnapshot()),
+  /** Snapshot of a run — the live run by default, or an archived session. */
+  snapshot: publicProcedure
+    .input(z.object({ sessionId: z.string().optional() }).optional())
+    .handler(({ input }) => store.getSnapshot(input?.sessionId)),
 
-  /** START / PAUSE / RESUME / STOP — spawns or signals the real agent process. */
+  /** Summaries of all archived sessions, newest first. */
+  listSessions: publicProcedure.handler(() => store.listSessions()),
+
+  /** START / PAUSE / RESUME / STOP / CONTINUE — spawns or signals the agent. */
   control: publicProcedure
-    .input(z.object({ action: z.enum(["start", "pause", "resume", "stop"]) }))
+    .input(z.object({ action: z.enum(["start", "pause", "resume", "stop", "continue"]) }))
     .handler(({ input }) => store.control(input.action)),
 
   /** Append a timestamped entry to the real human_interventions.log. */

@@ -113,7 +113,18 @@ export interface AgentSnapshot {
   updatedAt: string;
 }
 
-export type ControlAction = "start" | "pause" | "resume" | "stop";
+export type ControlAction = "start" | "pause" | "resume" | "stop" | "continue";
+
+/** Summary of one archived run, for the console's session switcher. */
+export interface SessionSummary {
+  id: string;
+  phase: Phase | null;
+  iteration: number;
+  score: number | null;
+  total: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
 
 export interface InterventionInput {
   type: string;

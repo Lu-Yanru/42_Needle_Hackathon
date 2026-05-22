@@ -3,16 +3,15 @@
 // deterministic (the harness runs tests, no model call) so the small local
 // model cannot drift or react to stale results.
 //
-// Model phases use Ollama's `format` (JSON-schema constrained output) to get
-// one validated action per turn — qwen2.5-coder does not reliably emit native
-// tool calls, so we never rely on `message.tool_calls`.
+// Model phases use schema-constrained structured output (the AI SDK's
+// generateObject) to get exactly one validated action per turn.
 
-import { z } from "zod";
 import { resolve } from "node:path";
 import { MAX_INNER_STEPS, MODEL, NO_IMPROVEMENT_LIMIT } from "./config";
 import type { EventLog } from "./events";
 import type { Logger } from "./logger";
-import { type ChatMessage, chat, type Usage } from "./ollama";
+import { type ChatMessage, generateStructured, type Usage } from "./openrouter";
+import { writeCheckpoint } from "./checkpoint";
 import * as prompts from "./prompts";
 import {
   compactFailureSignal,
@@ -41,31 +40,6 @@ import { drainOperatorPrompts } from "./operator";
 
 /** Zero token usage — recorded when a model call fails before producing output. */
 const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-
-/** Best-effort JSON extraction (handles fenced or prose-wrapped output). */
-function safeJson(text: string): unknown {
-  const tryParse = (value: string): unknown => {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return undefined;
-    }
-  };
-  const direct = tryParse(text);
-  if (direct !== undefined) return direct;
-  const fencedBody = /```(?:json)?\s*([\s\S]*?)```/.exec(text)?.[1];
-  if (fencedBody) {
-    const fenced = tryParse(fencedBody);
-    if (fenced !== undefined) return fenced;
-  }
-  const open = text.indexOf("{");
-  const close = text.lastIndexOf("}");
-  if (open >= 0 && close > open) {
-    const braced = tryParse(text.slice(open, close + 1));
-    if (braced !== undefined) return braced;
-  }
-  return null;
-}
 
 function actionToToolArgs(action: Action): { name: string; args: Record<string, unknown> } {
   switch (action.tool) {
@@ -163,7 +137,7 @@ async function doPlanning(state: RunState, logger: Logger, events: EventLog): Pr
   const prompt = prompts.planningPrompt(state.spec);
   await logger.prompt("PLANNING", prompt);
 
-  const res = await chat({
+  const res = await generateStructured({
     messages: [
       {
         role: "system",
@@ -171,7 +145,8 @@ async function doPlanning(state: RunState, logger: Logger, events: EventLog): Pr
       },
       { role: "user", content: prompt },
     ],
-    format: z.toJSONSchema(PlanSchema),
+    schema: PlanSchema,
+    schemaName: "plan",
   });
 
   if (res.isErr()) {
@@ -198,36 +173,18 @@ async function doPlanning(state: RunState, logger: Logger, events: EventLog): Pr
 
   const chatResult = res.value;
   await events.modelCall("PLANNING", chatResult.durationMs, chatResult.usage, 0);
-  const parsed = PlanSchema.safeParse(safeJson(chatResult.message.content));
-  if (parsed.success) {
-    state.plan = normalizePlan(parsed.data);
-    await logger.decision(
-      "plan accepted",
-      `run_command="${state.plan.run_command}", ${state.plan.steps.length} step(s)`,
-      "GENERATE_TESTS",
-    );
-    await events.emit("plan", {
-      runCommand: state.plan.run_command,
-      entrypoint: state.plan.entrypoint,
-      steps: state.plan.steps.length,
-    });
-    state.phase = "GENERATE_TESTS";
-    return;
-  }
-
-  state.planFailures++;
-  await logger.error(
-    "PLAN_PARSE",
-    parsed.error.message.slice(0, 300),
-    "no usable plan",
-    `retry (attempt ${state.planFailures})`,
+  state.plan = normalizePlan(chatResult.object);
+  await logger.decision(
+    "plan accepted",
+    `run_command="${state.plan.run_command}", ${state.plan.steps.length} step(s)`,
+    "GENERATE_TESTS",
   );
-  await events.errorEvent("PLAN_PARSE", parsed.error.message.slice(0, 200));
-
-  if (state.planFailures >= 3) {
-    await logger.error("PLANNING_FAILED", "3 planning attempts failed", "cannot proceed", "aborting run");
-    state.phase = "FAILED";
-  }
+  await events.emit("plan", {
+    runCommand: state.plan.run_command,
+    entrypoint: state.plan.entrypoint,
+    steps: state.plan.steps.length,
+  });
+  state.phase = "GENERATE_TESTS";
 }
 
 async function doGenerateTests(
@@ -241,11 +198,9 @@ async function doGenerateTests(
     return;
   }
 
-  // Generate one flat test per call. Ollama's constrained decoding is far
-  // slower on nested schemas, so a per-test loop stays fast and reliable
-  // where a single whole-suite call times out.
+  // Generate one flat test per call — a per-test loop lets each new case be
+  // deduplicated against the ones already accepted.
   const target = 4;
-  const testFormat = z.toJSONSchema(SelfTestSchema);
   const tests: SelfTest[] = deriveSpecSelfTests(state.spec, state.plan);
 
   if (tests.length > 0) {
@@ -260,7 +215,7 @@ async function doGenerateTests(
     const prompt = prompts.generateTestPrompt(state.spec, state.plan, tests);
     if (i === tests.length) await logger.prompt("GENERATE_TESTS", prompt);
 
-    const res = await chat({
+    const res = await generateStructured({
       messages: [
         {
           role: "system",
@@ -269,7 +224,8 @@ async function doGenerateTests(
         },
         { role: "user", content: prompt },
       ],
-      format: testFormat,
+      schema: SelfTestSchema,
+      schemaName: "self_test",
     });
 
     if (res.isErr()) {
@@ -286,25 +242,17 @@ async function doGenerateTests(
 
     const chatResult = res.value;
     await events.modelCall("GENERATE_TESTS", chatResult.durationMs, chatResult.usage, 0);
-    const parsed = SelfTestSchema.safeParse(safeJson(chatResult.message.content));
-    if (parsed.success && isUniqueSelfTest(tests, parsed.data)) {
-      tests.push(parsed.data);
-    } else if (parsed.success) {
+    const test = chatResult.object;
+    if (isUniqueSelfTest(tests, test)) {
+      tests.push(test);
+    } else {
       await logger.error(
         "SELFTEST_DUPLICATE",
-        `${parsed.data.rule} :: ${parsed.data.args}`,
+        `${test.rule} :: ${test.args}`,
         `self-test ${i + 1}/${target}`,
         "skipping duplicate case",
       );
-      await events.errorEvent("SELFTEST_DUPLICATE", parsed.data.rule.slice(0, 150));
-    } else {
-      await logger.error(
-        "SELFTEST_PARSE",
-        parsed.error.message.slice(0, 200),
-        `self-test ${i + 1}/${target}`,
-        "skipping this case",
-      );
-      await events.errorEvent("SELFTEST_PARSE", parsed.error.message.slice(0, 150));
+      await events.errorEvent("SELFTEST_DUPLICATE", test.rule.slice(0, 150));
     }
   }
 
@@ -387,7 +335,6 @@ async function doModelPhase(
   userPrompt += operatorSection;
   await logger.prompt(state.phase, userPrompt);
 
-  const actionFormat = z.toJSONSchema(ActionSchema);
   const baseMessages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
@@ -396,7 +343,11 @@ async function doModelPhase(
 
   let finished = false;
   for (let step = 0; step < MAX_INNER_STEPS && !finished; step++) {
-    const res = await chat({ messages: [...baseMessages, ...followupMessages], format: actionFormat });
+    const res = await generateStructured({
+      messages: [...baseMessages, ...followupMessages],
+      schema: ActionSchema,
+      schemaName: "action",
+    });
     if (res.isErr()) {
       await logger.error(
         "LLM_ERROR",
@@ -410,27 +361,8 @@ async function doModelPhase(
     const chatResult = res.value;
     await events.modelCall(state.phase, chatResult.durationMs, chatResult.usage, 1);
 
-    const parsed = ActionSchema.safeParse(safeJson(chatResult.message.content));
-    if (!parsed.success) {
-      await logger.error(
-        "ACTION_PARSE",
-        parsed.error.message.slice(0, 200),
-        `${state.phase} step ${step}`,
-        "asking model to retry",
-      );
-      await events.errorEvent("ACTION_PARSE", parsed.error.message.slice(0, 150));
-      followupMessages = [
-        { role: "assistant", content: chatResult.message.content },
-        {
-          role: "user",
-          content: "Your response was not a valid action JSON object. Respond with exactly one action object.",
-        },
-      ];
-      continue;
-    }
-
-    const action = parsed.data;
-    followupMessages = [{ role: "assistant", content: chatResult.message.content }];
+    const action = chatResult.object;
+    followupMessages = [{ role: "assistant", content: JSON.stringify(action) }];
     await logger.decision(`${state.phase} action: ${action.tool}`, action.reasoning);
 
     const { name, args } = actionToToolArgs(action);
@@ -629,6 +561,7 @@ export async function runAgent(state: RunState, logger: Logger, events: EventLog
     maxIterations: state.maxIterations,
   });
   await events.writeState(state);
+  await writeCheckpoint(events.dir, state);
 
   while (
     state.iteration < state.maxIterations &&
@@ -647,6 +580,7 @@ export async function runAgent(state: RunState, logger: Logger, events: EventLog
 
     state.iteration++;
     await events.writeState(state);
+    await writeCheckpoint(events.dir, state);
     console.log(`iteration ${state.iteration}: phase -> ${state.phase}`);
 
     if (state.dryRun) {

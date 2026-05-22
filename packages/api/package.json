@@ -14,10 +14,12 @@
     "@needle-agent/auth": "workspace:*",
     "@needle-agent/db": "workspace:*",
     "@needle-agent/env": "workspace:*",
+    "@openrouter/ai-sdk-provider": "catalog:",
     "@orpc/client": "catalog:",
     "@orpc/openapi": "catalog:",
     "@orpc/server": "catalog:",
     "@orpc/zod": "catalog:",
+    "ai": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

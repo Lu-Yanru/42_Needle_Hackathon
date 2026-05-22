@@ -1,6 +1,12 @@
 // Top-row panels: StatusBar, ScoreChart, FailingCategories, SubmissionChecklist.
 
-import type { ChecklistItem, ControlAction, RunState, ScorePoint } from "@needle-agent/api/agent/types";
+import type {
+  ChecklistItem,
+  ControlAction,
+  RunState,
+  ScorePoint,
+  SessionSummary,
+} from "@needle-agent/api/agent/types";
 import { Area, AreaChart, CartesianGrid, ReferenceDot, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { formatCountdown, formatElapsed, formatRelativeMs, useTicker } from "./format";
@@ -27,6 +33,11 @@ interface StatusBarProps {
   onViewChange: (v: "mission" | "chat") => void;
   chatUnread: number;
   onAction: (action: ControlAction) => void;
+  /** Archived runs available in the session switcher. */
+  sessions: SessionSummary[];
+  /** Currently viewed session — undefined means the live run. */
+  selectedSessionId: string | undefined;
+  onSelectSession: (id: string | undefined) => void;
 }
 
 export function StatusBar({
@@ -37,6 +48,9 @@ export function StatusBar({
   onViewChange,
   chatUnread,
   onAction,
+  sessions,
+  selectedSessionId,
+  onSelectSession,
 }: StatusBarProps) {
   // Tick every second so elapsed + countdown stay live.
   useTicker(1000);
@@ -49,6 +63,9 @@ export function StatusBar({
   const overdue = remainingMs < 0;
 
   const activeIdx = run.phase ? PHASES.indexOf(run.phase as (typeof PHASES)[number]) : -1;
+  const isArchived = !!selectedSessionId;
+  // A run can be resumed when it stopped mid-flight — not finished, not failed.
+  const resumable = !!run.phase && run.phase !== "DONE" && run.phase !== "FAILED";
 
   return (
     <div className="topbar">
@@ -126,41 +143,88 @@ export function StatusBar({
         </div>
 
         <div className="topbar-right">
+          <select
+            value={selectedSessionId ?? ""}
+            onChange={(e) => onSelectSession(e.target.value || undefined)}
+            title="View the live run or a past session"
+            style={{
+              background: "#0e1117",
+              color: "var(--text)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: 6,
+              fontFamily: "var(--mono)",
+              fontSize: 10.5,
+              padding: "4px 8px",
+              maxWidth: 230,
+              cursor: "pointer",
+            }}
+          >
+            <option value="">● Live run</option>
+            {sessions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.id} · {s.phase ?? "—"}
+                {s.score != null ? ` · ${s.score}/${s.total ?? "?"}` : ""}
+              </option>
+            ))}
+          </select>
+
           <span
             className="live-ind"
-            title={`Polling every 2.5s · last update ${formatRelativeMs(now - dataUpdatedAt)}`}
+            title={
+              isArchived
+                ? "Viewing an archived session (read-only)"
+                : `Polling every 2.5s · last update ${formatRelativeMs(now - dataUpdatedAt)}`
+            }
           >
-            <span className="live-dot" />
-            <span className="dim">live</span>
+            <span className="live-dot" style={isArchived ? { background: "#6b7280" } : undefined} />
+            <span className="dim">{isArchived ? "archived" : "live"}</span>
           </span>
 
-          <div className="run-controls">
-            {run.running && !run.paused && (
-              <>
-                <button type="button" className="btn btn-sm" onClick={() => onAction("pause")}>
-                  <Icon name="pause" /> Pause
-                </button>
-                <button type="button" className="btn btn-sm btn-danger" onClick={() => onAction("stop")}>
-                  <Icon name="stop" /> Stop
-                </button>
-              </>
-            )}
-            {run.running && run.paused && (
-              <>
-                <button type="button" className="btn btn-sm btn-primary" onClick={() => onAction("resume")}>
-                  <Icon name="play" /> Resume
-                </button>
-                <button type="button" className="btn btn-sm btn-danger" onClick={() => onAction("stop")}>
-                  <Icon name="stop" /> Stop
-                </button>
-              </>
-            )}
-            {!run.running && (
-              <button type="button" className="btn btn-sm btn-primary" onClick={() => onAction("start")}>
-                <Icon name="play" /> Start run
-              </button>
-            )}
-          </div>
+          {!isArchived && (
+            <div className="run-controls">
+              {run.running && !run.paused && (
+                <>
+                  <button type="button" className="btn btn-sm" onClick={() => onAction("pause")}>
+                    <Icon name="pause" /> Pause
+                  </button>
+                  <button type="button" className="btn btn-sm btn-danger" onClick={() => onAction("stop")}>
+                    <Icon name="stop" /> Stop
+                  </button>
+                </>
+              )}
+              {run.running && run.paused && (
+                <>
+                  <button type="button" className="btn btn-sm btn-primary" onClick={() => onAction("resume")}>
+                    <Icon name="play" /> Resume
+                  </button>
+                  <button type="button" className="btn btn-sm btn-danger" onClick={() => onAction("stop")}>
+                    <Icon name="stop" /> Stop
+                  </button>
+                </>
+              )}
+              {!run.running && (
+                <>
+                  {resumable && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-primary"
+                      onClick={() => onAction("continue")}
+                      title={`Continue the stopped run from ${run.phase}`}
+                    >
+                      <Icon name="play" /> Resume run
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className={resumable ? "btn btn-sm" : "btn btn-sm btn-primary"}
+                    onClick={() => onAction("start")}
+                  >
+                    <Icon name="play" /> {resumable ? "New run" : "Start run"}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
 
           <div className={`deadline ${urgent ? "urgent" : ""}`} title="Friday 12:00 submission deadline">
             <span className="l">submission in</span>
