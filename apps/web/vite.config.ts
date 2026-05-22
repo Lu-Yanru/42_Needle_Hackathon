@@ -4,6 +4,8 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  // Load env from the monorepo root .env (single source of truth).
+  envDir: "../..",
   server: {
     port: 3001,
   },

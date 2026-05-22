@@ -11,6 +11,7 @@ import { MAX_INNER_STEPS, MODEL, NO_IMPROVEMENT_LIMIT } from "./config";
 import type { EventLog } from "./events";
 import type { Logger } from "./logger";
 import { type ChatMessage, generateStructured, type Usage } from "./openrouter";
+import { writeCheckpoint } from "./checkpoint";
 import * as prompts from "./prompts";
 import {
   compactFailureSignal,
@@ -560,6 +561,7 @@ export async function runAgent(state: RunState, logger: Logger, events: EventLog
     maxIterations: state.maxIterations,
   });
   await events.writeState(state);
+  await writeCheckpoint(events.dir, state);
 
   while (
     state.iteration < state.maxIterations &&
@@ -578,6 +580,7 @@ export async function runAgent(state: RunState, logger: Logger, events: EventLog
 
     state.iteration++;
     await events.writeState(state);
+    await writeCheckpoint(events.dir, state);
     console.log(`iteration ${state.iteration}: phase -> ${state.phase}`);
 
     if (state.dryRun) {

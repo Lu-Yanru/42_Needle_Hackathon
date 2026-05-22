@@ -7,16 +7,16 @@ export async function writeManifest(path = "agent_manifest.json"): Promise<void>
   const manifest = {
     team_name: TEAM_NAME,
     primary_model: MODEL,
-    provider: "OpenRouter",
+    provider: "Ollama (local)",
     runtime_or_tool: "custom TypeScript agent harness (Bun)",
     additional_models: [],
     paid_frontier_models_used_after_spec_release: false,
     copilot_or_paid_ide_assistant_used_after_spec_release: false,
     institutional_or_work_model_quota_used_after_spec_release: false,
-    paid_inference_api_used: true,
+    paid_inference_api_used: false,
     model_configuration_location: "apps/agent/src/config.ts",
     notes:
-      "Inference runs on OpenRouter (a paid inference API) using the open-weight model openai/gpt-oss-120b. No paid frontier models, Copilot or paid IDE assistants, or institutional/work model quota were used after the hidden task release.",
+      "Inference runs entirely on a local Ollama instance (no cloud API, no network inference) using the open-weight model qwen2.5-coder:7b. No paid inference, paid frontier models, Copilot or paid IDE assistants, or institutional/work model quota were used after the hidden task release.",
   };
   await Bun.write(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }

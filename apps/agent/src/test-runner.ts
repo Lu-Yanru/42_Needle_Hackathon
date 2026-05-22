@@ -82,15 +82,25 @@ async function findRunner(workspaceDir: string): Promise<string | null> {
 }
 
 export function parseTestOutput(output: string): TestResult {
-  const scoreMatch =
-    /(?:SCORE|Score|PASSED|Passed|RESULT)\s*[:=]?\s*(\d+)\s*\/\s*(\d+)/.exec(
-      output,
-    );
-  const score = scoreMatch ? Number(scoreMatch[1] ?? "0") : 0;
-  const total = scoreMatch ? Number(scoreMatch[2] ?? "0") : 0;
-  const failing = [...output.matchAll(/^\s*FAIL(?:ED)?\s*[:-]?\s*(\S+)/gim)]
-    .map((m) => m[1] ?? "")
-    .filter(Boolean);
+  // The official runner (secret_spec/test_runner/run_tests.py) prints a
+  // scoreboard whose "Overall [bar] N/M passed" line carries the score. Fall
+  // back to a generic "Score: N/M" for any other runner.
+  const match =
+    /Overall\s+\[[^\]]*\]\s+(\d+)\s*\/\s*(\d+)\s+passed/.exec(output) ??
+    /(?:SCORE|Score|RESULT)\s*[:=]?\s*(\d+)\s*\/\s*(\d+)/.exec(output);
+  const score = match ? Number(match[1]) : 0;
+  const total = match ? Number(match[2]) : 0;
+
+  // The runner prints one "level_NN_name [bar] passed/total" line per level;
+  // a level counts as failing when passed < total.
+  const failing: string[] = [];
+  for (const m of output.matchAll(
+    /^\s*(level_\S+)\s+\[[^\]]*\]\s+(\d+)\s*\/\s*(\d+)\s*$/gim,
+  )) {
+    const name = m[1] ?? "";
+    if (name && Number(m[2]) < Number(m[3])) failing.push(name);
+  }
+
   return {
     score,
     total,

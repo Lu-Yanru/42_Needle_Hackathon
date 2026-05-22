@@ -6,8 +6,8 @@
     "build": "tsdown",
     "typecheck": "tsc -b",
     "compile": "bun build --compile --minify --sourcemap --bytecode ./src/index.ts --outfile server",
-    "dev": "bun run --hot src/index.ts",
-    "start": "bun run dist/index.mjs"
+    "dev": "bun run --hot --env-file ../../.env src/index.ts",
+    "start": "bun run --env-file ../../.env dist/index.mjs"
   },
   "dependencies": {
     "@needle-agent/api": "workspace:*",

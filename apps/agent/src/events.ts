@@ -62,6 +62,23 @@ export class EventLog {
       })
     ).unwrapOr("");
     log.seq = existing.trim() ? existing.trim().split("\n").length : 0;
+    // Seed cumulative counters from a prior state.json so a --resume run
+    // continues the run's totals instead of restarting them at zero. A fresh
+    // run has no state.json (startAgent clears it) — counters stay at zero.
+    const prior = (
+      await Result.tryPromise({
+        try: () => Bun.file(log.path("state.json")).json() as Promise<RunStateSnapshot>,
+        catch: (cause) =>
+          new FileSystemError({ operation: "read", path: log.path("state.json"), cause }),
+      })
+    ).unwrapOr(null);
+    if (prior) {
+      log.modelCalls = prior.modelCalls ?? 0;
+      log.toolCalls = prior.toolCalls ?? 0;
+      log.errors = prior.errors ?? 0;
+      log.totalInputTokens = prior.totalInputTokens ?? 0;
+      log.totalOutputTokens = prior.totalOutputTokens ?? 0;
+    }
     return log;
   }
 
