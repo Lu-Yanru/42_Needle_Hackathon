@@ -1,0 +1,289 @@
+{
+  "specPath": "../../../42xNeedle_Hackathon/secret_spec/SECRET_SPEC.md",
+  "spec": "# Secret Spec: A Knitting Compiler\n\n## 1. Goal\n\nBuild a command-line tool called **Knitting Compiler**.\n\nThe tool reads knitting pattern files written in a small domain-specific language, parses them, validates them, expands repeats, simulates stitch counts row by row, and prints one structured JSON document to stdout.\n\nThis is a compiler/interpreter-style problem. The domain is knitting because the sponsor is called Needle, and apparently we are all committed to the bit. The technical task is still serious: parsing, validation, simulation, error recovery, and deterministic output.\n\n## 2. Required CLI\n\nYour tool must support exactly this command shape:\n\n```bash\npython knit.py compile <input_file>\n```\n\nExample:\n\n```bash\npython knit.py compile examples/scarf.knit\n```\n\nThe `compile` command must print exactly one JSON document to stdout.\n\nIt must not print logs, debug output, explanations, success messages, stack traces, or any other non-JSON text to stdout.\n\nAll diagnostic or debug output, if any, must go to stderr. For judging, stdout is the contract.\n\n## 3. Input Files\n\nInput files use the `.knit` extension.\n\nExample:\n\n```text\npattern \"Tiny Doom Scarf\"\n\ncast_on 10\n\nrow 1: k10\nrow 2: p10\nrow 3: k2, yo, k6, k2tog\n\nrepeat rows 1-3 x2\n\nbind_off\n```\n\nBlank lines are allowed.\n\nLine numbers are 1-based physical line numbers in the input file. Blank lines and comments still count for line numbering.\n\n## 4. Comments\n\nA `#` character outside a quoted pattern name begins a comment.\n\nA comment extends from `#` to the end of the line.\n\nFor comment stripping, double quotes are tracked lexically before pattern validation. A `#` character after an opening double quote is treated as part of the attempted quoted string until a closing double quote is found. If the quote is never closed, the line is malformed; the `#` does not start a comment in that case. Escaped quotes are not supported.\n\nExamples:\n\n```text\n# full-line comment\nrow 1: k10   # inline comment\n```\n\nThe parser must ignore comments.\n\n## 5. Case Sensitivity\n\nAll keywords and stitch operations are case-sensitive and lowercase.\n\nValid keywords:\n\n```text\npattern\ncast_on\nrow\nrepeat\nbind_off\n```\n\nValid stitch operations:\n\n```text\nk\np\nyo\nk2tog\nssk\ninc\ndec\n```\n\nExamples:\n\n```text\nrow 1: k10      # valid\nrow 1: K10      # invalid: UNKNOWN_STITCH\nPattern \"Hat\"   # invalid: UNKNOWN_STATEMENT\n```\n\n## 6. Statement Recognition and Malformed Statements\n\nAfter removing comments and trimming leading/trailing whitespace:\n\n- An empty line is ignored.\n- Statement recognition requires a token boundary. A recognized keyword must be followed by whitespace or end of line. The keyword must not be glued directly to its argument or to other text. For example, `patterned \"Hat\"`, `pattern\"Hat\"`, `cast_on10`, `row1: k1`, `repeatrows 1-2 x1`, and `bind_offnow` are all `UNKNOWN_STATEMENT`, not malformed versions of their visually similar statements.\n- A line beginning with a recognized statement keyword but not matching that statement's required syntax must be reported using the corresponding malformed error code.\n- A line that does not begin with any recognized statement keyword must be reported as `UNKNOWN_STATEMENT`.\n- Trailing non-comment text after an otherwise valid statement makes that statement malformed. For example, `cast_on 10 extra` is `MALFORMED_CAST_ON`, `row 1: k1 extra` is `MALFORMED_ROW`, and `repeat rows 1-1 x1 extra` is `MALFORMED_REPEAT`.\n- If a malformed statement uses a recognized keyword, the corresponding missing-statement error is suppressed. For example, a file containing only `pattern Bad` should report `MALFORMED_PATTERN`, not both `MALFORMED_PATTERN` and `MISSING_PATTERN`.\n\nExamples:\n\n```text\npattern Tiny Doom Scarf     # MALFORMED_PATTERN: missing double quotes\ncast on 10                  # UNKNOWN_STATEMENT: keyword is not cast_on\ncast_on ten                 # MALFORMED_CAST_ON\nrow 1 k10                   # MALFORMED_ROW: missing colon\nrepeat row 1-3 x2           # MALFORMED_REPEAT\nbind_off now                # MALFORMED_BIND_OFF\nbind_offnow                 # UNKNOWN_STATEMENT: no token boundary after bind_off\npatterned \"Hat\"             # UNKNOWN_STATEMENT: no token boundary after pattern\npattern\"Hat\"                # UNKNOWN_STATEMENT: no token boundary after pattern\ncast_on10                   # UNKNOWN_STATEMENT: no token boundary after cast_on\nrepeatrows 1-2 x1           # UNKNOWN_STATEMENT: no token boundary after repeat\nrow1: k1                    # UNKNOWN_STATEMENT: no token boundary after row\ncast_on 10 extra            # MALFORMED_CAST_ON: trailing non-comment text\n```\n\n## 6A. Positive Integers\n\nAll positive integers in this spec are parsed as base-10 integer values. Leading zeros are allowed as long as the resulting value is positive.\n\nExamples:\n\n```text\ncast_on 05              # valid, value 5\nrow 01: k1              # valid row number 1\nrow 1: k01              # valid stitch count 1\n[k1] x02                # valid repeat count 2\nrepeat rows 01-02 x03   # valid range 1-2, count 3\n```\n\nAll output JSON must use normalized integer values, not the original textual representation. For example, `row 01: k1` has `source_row: 1`.\n\n```text\ncast_on 00              # invalid: MALFORMED_CAST_ON\nrow 00: k1              # invalid: MALFORMED_ROW\n[k1] x00                # invalid: MALFORMED_ROW\nrepeat rows 00-01 x1    # invalid: INVALID_REPEAT_RANGE\n```\n\n## 7. Pattern Declaration\n\nEvery pattern must contain exactly one pattern declaration:\n\n```text\npattern \"Pattern Name\"\n```\n\nThe pattern name is any sequence of characters inside double quotes, excluding newline and unescaped double quote.\n\nEscaped quotes are not supported.\n\nExamples:\n\n```text\npattern \"Tiny Doom Scarf\"   # valid\npattern \"\"                  # valid, empty name\npattern Tiny Doom Scarf      # invalid\npattern \"Bad \" Name\"        # invalid\n```\n\nThe output `pattern_name` value must preserve the pattern name string. JSON escaping is allowed as long as it represents the same string value after JSON parsing.\n\nIf multiple valid pattern declarations exist, the compiler must report `DUPLICATE_PATTERN` for each additional valid pattern declaration after the first. The error `line` must be the line of the additional duplicate declaration. In this case, output `pattern_name: null`.\n\nIf a file contains a recognized but malformed `pattern` statement and no valid pattern declaration, report `MALFORMED_PATTERN`, suppress `MISSING_PATTERN`, and output `pattern_name: null`.\n\n## 8. Cast On\n\nEvery pattern must contain exactly one cast-on declaration:\n\n```text\ncast_on 24\n```\n\nRules:\n\n- `cast_on` must be a positive integer.\n- `cast_on` must appear before any row statement.\n- A row statement means any non-empty, non-comment line recognized with the `row` keyword and token boundary, including malformed rows, empty rows, rows with unknown stitches, and rows with invalid row numbers such as `row 0: k1`.\n- Duplicate `cast_on` declarations are invalid.\n- If any recognized `cast_on` statement appears after rows, report `CAST_ON_OUT_OF_ORDER`, even if that `cast_on` statement is malformed.\n- If a `cast_on` statement appears after rows and is also a duplicate, report both `CAST_ON_OUT_OF_ORDER` and `DUPLICATE_CAST_ON`.\n\nExamples:\n\n```text\ncast_on 24     # valid\ncast_on 0      # invalid: MALFORMED_CAST_ON\ncast_on -3     # invalid: MALFORMED_CAST_ON\ncast_on ten    # invalid: MALFORMED_CAST_ON\n```\n\nIf multiple syntactically valid `cast_on` declarations exist, the compiler must report `DUPLICATE_CAST_ON` for each additional valid `cast_on` declaration after the first. The error `line` must be the line of the additional duplicate declaration. In this case, output `cast_on: null`.\n\nIf the only syntactically valid `cast_on` appears after a row statement, output the parsed `cast_on` value, but report `CAST_ON_OUT_OF_ORDER`. That `cast_on` value is not usable for stitch simulation.\n\nIf a malformed `cast_on` appears after rows, report both `MALFORMED_CAST_ON` and `CAST_ON_OUT_OF_ORDER`. The malformed recognized `cast_on` suppresses `MISSING_CAST_ON`. A malformed `cast_on` does not count as a duplicate declaration. `DUPLICATE_CAST_ON` is reported only for additional syntactically valid `cast_on` declarations after the first valid `cast_on`.\n\nIf a file contains a recognized but malformed `cast_on` statement and no syntactically valid cast-on declaration, report `MALFORMED_CAST_ON`, suppress `MISSING_CAST_ON`, and output `cast_on: null`.\n\n## 9. Row Syntax\n\nRows use this format:\n\n```text\nrow <number>: <instruction_list>\n```\n\nExamples:\n\n```text\nrow 1: k10\nrow 2: p10\nrow 3: k2, yo, k6, k2tog\n```\n\nRules:\n\n- Row numbers must be positive integers.\n- Rows must appear in strictly increasing order.\n- Duplicate row numbers are invalid.\n- Duplicate detection takes priority over out-of-order detection. If a row number was already claimed by any earlier structurally valid positive row header, report `DUPLICATE_ROW` only for that line, never `OUT_OF_ORDER_ROW`.\n- `OUT_OF_ORDER_ROW` is reported only for a non-duplicate valid positive row number that is lower than the greatest previously claimed source row number.\n- Example: `row 3`, then `row 2`, then another `row 2` reports `OUT_OF_ORDER_ROW` for the first `row 2` and `DUPLICATE_ROW` for the second `row 2`. Example: `row 3`, then `row 2`, then `row 4` reports `OUT_OF_ORDER_ROW` for `row 2`; `row 4` is not out of order.\n- A row with an invalid row number, such as `row 0: k1` or `row -1: k1`, is `MALFORMED_ROW` and does not claim a source row number.\n- A row must contain at least one instruction.\n- An empty row such as `row 5:` is invalid and must be reported as `MALFORMED_ROW`. Because the header is structurally valid, it still claims source row number 5.\n- Rows may not appear after `bind_off`.\n- A row with a structurally valid header, such as `row 1: ...`, claims that source row number even if its instruction list is empty, malformed, or contains invalid stitches. It still counts for duplicate detection, out-of-order detection, and row repeat range existence.\n- A duplicate row is invalid and is not inserted into the internal source row sequence used for row repeat expansion or stitch simulation.\n- An out-of-order row is invalid and is not inserted into the internal source row sequence used for row repeat expansion or stitch simulation.\n- Duplicate and out-of-order rows still claim their source row number for later duplicate detection, as long as their row header is structurally valid and their row number is a positive integer.\n- Because duplicate and out-of-order rows are not simulated, the compiler must not emit `STITCH_UNDERFLOW` or `STITCH_OVERFLOW` errors caused only by the instructions inside those rows. Other detectable errors on those rows, such as `UNKNOWN_STITCH` or malformed bracket syntax, must still be reported where possible.\n\n## 10. Supported Stitch Operations\n\nThe compiler must support the following stitch operations.\n\n| Stitch | Meaning |\n|---|---|\n| `kN` | knit N stitches |\n| `pN` | purl N stitches |\n| `yo` | yarn over |\n| `k2tog` | knit two together |\n| `ssk` | slip slip knit |\n| `inc` | increase |\n| `dec` | decrease |\n\nFor counted stitches, `N` must be a positive integer.\n\nExamples:\n\n```text\nk1\nk10\np24\n```\n\nInvalid examples:\n\n```text\nk0\np-2\nk\np\n```\n\nInvalid stitch tokens must be reported as `UNKNOWN_STITCH`.\n\n## 11. Stitch Count Model\n\nThe compiler tracks the number of live stitches on the working row.\n\nFor each row:\n\n- `start_stitches` is the number of stitches available when the row begins.\n- For the first expanded row, `start_stitches` is equal to `cast_on`.\n- For every later expanded row, `start_stitches` is equal to the previous expanded row's `end_stitches`.\n- `end_stitches` is the number of stitches produced by the row after all instructions are processed.\n\nThis means `k10` consumes 10 stitches from the previous row and produces 10 stitches in the working row. The count does not change.\n\nStitch semantics:\n\n| Stitch | Consumes | Produces |\n|---|---:|---:|\n| `kN` | N | N |\n| `pN` | N | N |\n| `yo` | 0 | 1 |\n| `k2tog` | 2 | 1 |\n| `ssk` | 2 | 1 |\n| `inc` | 1 | 2 |\n| `dec` | 2 | 1 |\n\nDuring simulation, the compiler must track remaining stitches available from the previous row.\n\nStitch simulation only begins if there is exactly one valid usable `cast_on` value. A usable `cast_on` is a syntactically valid, non-duplicate `cast_on` that appears before any row statement. If `cast_on` is missing, malformed, duplicated, or out of order, do not perform stitch simulation and do not emit `STITCH_UNDERFLOW` or `STITCH_OVERFLOW`.\n\nIf a row reaches `STITCH_UNDERFLOW`, simulation stops at the first underflow. Do not continue simulating that row or any later rows. Emit at most one `STITCH_UNDERFLOW` error for the source row where simulation stopped.\n\nIf the produced stitch count for the current working row exceeds 10,000 at any point while processing that row, report `STITCH_OVERFLOW`. Simulation stops immediately at that point. Do not continue simulating that row or any later rows. Emit at most one `STITCH_OVERFLOW` error for the source row where simulation stopped.\n\nIf `STITCH_UNDERFLOW` or `STITCH_OVERFLOW` occurs during a repeated instance of a source row, the error `line` is the physical line of the original source row and `row` is the original source row number.\n\nExample:\n\n```text\ncast_on 5\nrow 1: k3, k4\n```\n\nSimulation:\n\n- Row starts with 5 stitches.\n- `k3` consumes 3, leaving 2 available from the previous row.\n- `k4` requires 4, but only 2 remain.\n- This is `STITCH_UNDERFLOW`.\n\n## 12. Instruction Lists\n\nAn instruction list is a comma-separated list of instructions.\n\nExamples:\n\n```text\nk10\nk2, p6, k2\nk2, yo, k6, k2tog\n```\n\nWhitespace around commas is optional.\n\nInstructions must be separated by commas. A whitespace-separated sequence inside a single instruction item is not split into multiple instructions. For example, `row 1: k1 dance10` is `MALFORMED_ROW`, not `UNKNOWN_STITCH`, because the instruction list is not comma-separated correctly. By contrast, `row 1: k1, dance10` reports `UNKNOWN_STITCH` for the comma-separated unknown stitch token.\n\nA malformed whitespace-separated instruction item is not further tokenized for additional `UNKNOWN_STITCH` errors. For example, `row 1: k0 dance10` reports `MALFORMED_ROW` only for that malformed instruction item, not separate `UNKNOWN_STITCH` errors for `k0` and `dance10`.\n\nEach comma-separated invalid stitch token produces its own `UNKNOWN_STITCH` error. For example, `row 1: dance10, twirl2` reports two `UNKNOWN_STITCH` errors, one for `dance10` and one for `twirl2`, ordered by their source position within the row.\n\nEmpty comma-separated instruction items are `MALFORMED_ROW`. For example, `row 1: k1,,p1`, `row 1: k1,`, and `row 1: ,k1` are all `MALFORMED_ROW`. Non-empty neighboring items may still be inspected for independently detectable `UNKNOWN_STITCH` errors, but the row is skipped entirely for stitch simulation if it has `MALFORMED_ROW` or `UNKNOWN_STITCH`.\n\nThese must parse identically:\n\n```text\nrow 1:k10\nrow 1: k10\nrow 1: k2,yo,k6,k2tog\nrow 1: k2, yo, k6, k2tog\n```\n\n## 13. Bracketed Repeats\n\nInstruction lists may contain bracketed repeats:\n\n```text\n[k2, p2] x3\n```\n\nA valid bracketed repeat has this shape:\n\n```text\n[<instruction_list>] x<count>\n```\n\nThere must be at least one whitespace character between the closing `]` and the `x<count>` token. The `x` and the count must be contiguous.\n\nExamples:\n\n```text\n[k2, p2] x3    # valid\n[k2,p2] x3     # valid\n[k2,p2]x3      # MALFORMED_ROW\n[k2] x 3       # MALFORMED_ROW\n```\n\nA bracketed repeat repeats the bracketed instruction list exactly `N` total times.\n\nExample:\n\n```text\nrow 1: [k2, p2] x3\n```\n\nEquivalent expanded instruction list:\n\n```text\nk2, p2, k2, p2, k2, p2\n```\n\nNested bracketed repeats are required.\n\nExample:\n\n```text\nrow 1: [k1, [p1, yo] x2] x3\n```\n\nThe repeat count must be a positive integer.\n\nInvalid bracket syntax or invalid bracket repeat counts must be reported as `MALFORMED_ROW`.\n\nNote: bracketed repeats are part of row syntax, so bracket-related errors use `MALFORMED_ROW`, not `INVALID_REPEAT_COUNT`. A bracketed repeat must appear as a comma-separated instruction-list item. It may not be adjacent to another instruction without a comma; for example, `row 1: [k1] x2 k1` is `MALFORMED_ROW`.\n\nInvalid stitch tokens inside a syntactically valid bracketed repeat are reported as `UNKNOWN_STITCH`, not `MALFORMED_ROW`. For example, `row 1: [k0] x2` reports `UNKNOWN_STITCH`, because the bracketed repeat syntax is valid but `k0` is not a valid stitch token.\n\nIf a row contains both malformed bracket syntax and independently detectable unknown stitch tokens, report both `MALFORMED_ROW` and `UNKNOWN_STITCH` where possible. If malformed bracket syntax prevents reliable parsing of part of the instruction list, the compiler is not required to scan that unparseable region token-by-token; reporting only the errors confidently detected is acceptable. If the bracket structure is parseable and an unknown stitch appears inside it, report `UNKNOWN_STITCH`.\n\n## 14. Row Repeats\n\nThe compiler must support row repeat statements:\n\n```text\nrepeat rows <start>-<end> x<count>\n```\n\nExample:\n\n```text\nrepeat rows 1-3 x2\n```\n\nA row repeat repeats the referenced source row range `count` additional times beyond the original rows.\n\nTherefore:\n\n```text\nrow 1: k10\nrow 2: p10\nrepeat rows 1-2 x2\n```\n\nExpands to this row source sequence:\n\n```text\n1, 2, 1, 2, 1, 2\n```\n\nThe original rows appear once, then the range is repeated 2 additional times.\n\nImportant convention:\n\n- Bracketed repeats produce exactly `N` total iterations.\n- Row repeats produce `N` additional iterations beyond the original source rows.\n\nThis difference is intentional and mirrors common knitting language. Yes, it is slightly annoying. So is parsing.\n\nRules:\n\n- `start` and `end` must be positive integers.\n- `start` must be less than or equal to `end`.\n- `count` must be a positive integer.\n- The range and count tokens must not contain internal whitespace. `repeat rows 1-3 x2` is valid syntax. `repeat rows 1 - 3 x2` and `repeat rows 1-3 x 2` are `MALFORMED_REPEAT`.\n- A syntactically present count token after `x` that is not a positive integer, such as `x0`, `x-1`, or `xtwo`, is `INVALID_REPEAT_COUNT`, not `MALFORMED_REPEAT`.\n- A missing count after `x`, such as `repeat rows 1-2 x`, is also `INVALID_REPEAT_COUNT`, not `MALFORMED_REPEAT`.\n- Integer-looking non-positive range values, such as `repeat rows 0-1 x1` or `repeat rows -1-2 x1`, are `INVALID_REPEAT_RANGE`, not `MALFORMED_REPEAT`.\n- Every row in the referenced range must already exist as an original source row at the point where the repeat statement appears in source order. A later row declaration does not satisfy an earlier repeat. For example, `repeat rows 1-1 x1` before `row 1: k1` reports `INVALID_REPEAT_RANGE`.\n- Rows with structurally valid headers but invalid bodies, such as rows with `UNKNOWN_STITCH` or `MALFORMED_ROW`, count as existing source rows for repeat range validation. A repeat referencing such a row is not `INVALID_REPEAT_RANGE` solely because the row body is invalid.\n- Rows that are claimed but excluded from simulation or expansion because of `DUPLICATE_ROW`, `OUT_OF_ORDER_ROW`, or placement after `bind_off` also count as existing source rows for repeat range validation.\n- Row repeat references always refer to original source row numbers, not previously expanded rows.\n- Multiple row repeat statements are allowed.\n- Expansion follows source statement order exactly. For example, `row 1`, then `repeat rows 1-1 x1`, then `row 2`, then `repeat rows 1-2 x1` expands to source row sequence `1, 1, 2, 1, 2`.\n- A row repeat may not appear after `bind_off`.\n- A row repeat after `bind_off` must still be parsed for its own errors, but it is excluded from the internal expanded row sequence used for simulation.\n\nInvalid row repeats must be reported as either `MALFORMED_REPEAT`, `INVALID_REPEAT_RANGE`, or `INVALID_REPEAT_COUNT`, as appropriate.\n\nUse `MALFORMED_REPEAT` when the line begins with `repeat` but does not have the required `repeat rows <start>-<end> x<count>` structure. Use `INVALID_REPEAT_COUNT` when the structure is otherwise recognizable but the count after `x` is not a positive integer. Use `INVALID_REPEAT_RANGE` when the structure is otherwise recognizable but the range values are invalid, including non-positive start/end values, `start > end`, or references to missing source rows.\n\nA single repeat statement may produce multiple different error codes. For example, `repeat rows 2-4 x0` may produce both `INVALID_REPEAT_COUNT` and `INVALID_REPEAT_RANGE` if row 4 does not exist. Similarly, `repeat rows 0-2 x0` produces both `INVALID_REPEAT_COUNT` and `INVALID_REPEAT_RANGE` because the count is invalid and the range contains a non-positive row number. However, a single repeat statement must emit at most one `INVALID_REPEAT_RANGE`, even if the range is invalid for multiple reasons such as `start > end` and missing referenced rows.\n\nFor internal expansion and simulation, an invalid row repeat statement must be excluded from the expanded row sequence. The compiler must still continue parsing later statements and may include later valid row repeat statements in the internal sequence if simulation is still possible.\n\n## 15. Bind Off\n\nPatterns may contain a `bind_off` statement:\n\n```text\nbind_off\n```\n\nRules:\n\n- `bind_off` is optional.\n- If present, `bind_off` must be the last non-empty, non-comment statement in the file.\n- Duplicate `bind_off` statements are invalid.\n- Any non-empty, non-comment statement after a syntactically valid `bind_off` is invalid and must report `BIND_OFF_OUT_OF_ORDER`, except for a second syntactically valid `bind_off`, which reports `DUPLICATE_BIND_OFF` only.\n- Statements after `bind_off` must still be fully parsed for their own errors. `BIND_OFF_OUT_OF_ORDER` is additional, not exclusive, except for the duplicate valid `bind_off` case described above. For example, `row 3: dance10` after `bind_off` should report both `BIND_OFF_OUT_OF_ORDER` and `UNKNOWN_STITCH`; `pattern Bad` after `bind_off` should report both `BIND_OFF_OUT_OF_ORDER` and `MALFORMED_PATTERN`.\n\nA malformed `bind_off` statement after a syntactically valid `bind_off`, such as `bind_off now`, reports both `MALFORMED_BIND_OFF` and `BIND_OFF_OUT_OF_ORDER`. Only a second syntactically valid `bind_off` reports `DUPLICATE_BIND_OFF` without `BIND_OFF_OUT_OF_ORDER`.\n\nA row or row repeat after `bind_off` is invalid and is excluded from the internal source row sequence or expanded row sequence used for simulation. It must still be parsed for all independently detectable errors. A structurally valid positive row header after `bind_off` still claims its source row number for duplicate detection, out-of-order detection, and row repeat range existence. Therefore, if `bind_off` is followed by `row 1: k1` and then `repeat rows 1-1 x1`, the repeat does not report `INVALID_REPEAT_RANGE` merely because `row 1` is after `bind_off`; the repeat is still invalid/excluded because it appears after `bind_off`.\n\nThe output field `bind_off` must be `true` if a syntactically valid `bind_off` statement is present anywhere in the file, even if the full pattern is invalid for other reasons.\n\nIf no syntactically valid `bind_off` statement is present, `bind_off` must be `false`.\n\n## 16. Error Recovery\n\nThe compiler must report all errors it can reasonably detect, not only the first error.\n\nContinue parsing after errors where possible.\n\nExamples:\n\n- A malformed row should not prevent detecting a later duplicate row number.\n- An unknown stitch should not prevent detecting a later invalid repeat range.\n- A missing pattern declaration should not prevent parsing rows and reporting row-specific errors.\n\nIf a row cannot be parsed at all, skip that row for simulation purposes, but continue parsing later statements.\n\nIf a row has a structurally valid row header but contains an empty instruction list, malformed instructions, malformed bracket syntax, or unknown stitches, it still counts as an original source row for duplicate detection, out-of-order detection, and repeat range existence. However, skip the entire row for simulation purposes. Do not partially simulate a row with `UNKNOWN_STITCH` or `MALFORMED_ROW`.\n\nIf a row repeat references an invalid-but-claimed source row, including a row with a broken body, a duplicate row, an out-of-order row, or a row after `bind_off`, the repeat range itself is still range-valid. During internal expansion and simulation, occurrences of excluded source rows are skipped. This remains true even if every row in the referenced range is excluded; the repeat does not report `INVALID_REPEAT_RANGE` solely for that reason and contributes no rows to internal expansion or simulation. Since the final output is invalid whenever any error exists, `expanded_rows` is still empty in the emitted JSON.\n\nRows with invalid row numbers, such as `row 0: k1` or `row -1: k1`, do not claim source row numbers and do not count for duplicate detection, out-of-order detection, or row repeat range existence.\n\nRows that report `DUPLICATE_ROW` or `OUT_OF_ORDER_ROW` are invalid and are excluded from the internal source row sequence used for row repeat expansion and stitch simulation. They still claim their source row number for later duplicate detection if their row header is structurally valid and positive. They may still report other independently detectable errors, but their stitch instructions must not produce `STITCH_UNDERFLOW` or `STITCH_OVERFLOW`.\n\nRows after `bind_off` are invalid and excluded from simulation, but their headers still claim source row numbers for duplicate detection, out-of-order detection, and row repeat range existence if structurally valid and positive.\n\nIf there is no exactly one valid usable `cast_on` value, skip stitch simulation entirely. A syntactically valid `cast_on` that appears after a row is still reported in the top-level `cast_on` field, but it is not usable for simulation. For example, a file with `pattern \"X\"` and `row 1: k999` but no valid usable `cast_on` reports `MISSING_CAST_ON` or `CAST_ON_OUT_OF_ORDER` as applicable, not a stitch-count error.\n\nIf simulation reaches `STITCH_UNDERFLOW` or `STITCH_OVERFLOW`, stop simulation entirely at the first such error. Do not continue simulating the current row or any later rows.\n\nIf any error is present, the final output must have:\n\n```json\n\"valid\": false\n```\n\nand `expanded_rows` must be an empty array.\n\n## 17. Error Object Schema\n\nEach error object must use this schema:\n\n```json\n{\n  \"type\": \"error\",\n  \"code\": \"ERROR_CODE\",\n  \"message\": \"Human-readable message\",\n  \"line\": 4,\n  \"row\": 2\n}\n```\n\nRules:\n\n- `type` must always be exactly `\"error\"`.\n- `code` must be one of the defined error codes in Section 18.\n- `message` must be a non-empty human-readable string.\n- Exact message wording is implementation-defined. The normative error fields are `type`, `code`, `line`, and `row`; automated evaluation must not require exact `message` string matches.\n- `line` must be an integer source line number when the error is tied to a physical line; otherwise it must be `null`.\n- `row` must be an integer source row number when the error is tied to a row; otherwise it must be `null`.\n- Every error object must include all five keys: `type`, `code`, `message`, `line`, and `row`.\n\nErrors should be ordered by source line number when possible. Errors with `line: null` should appear after line-specific errors. When multiple errors occur on the same physical source line, order them by the order of their error codes in the Section 18 table, not by implementation-specific detection order. When multiple errors with the same code occur on the same physical source line, order them by their source position from left to right where applicable. In particular, `INVALID_REPEAT_COUNT` is ordered before `INVALID_REPEAT_RANGE` because that is the order used in the Section 18 table.\n\n## 18. Error Codes\n\nThe following error codes are allowed.\n\n| Code | Meaning |\n|---|---|\n| `MISSING_PATTERN` | No `pattern` statement was found. If a `pattern` statement exists but is malformed, use `MALFORMED_PATTERN` instead. |\n| `MALFORMED_PATTERN` | A line begins with `pattern` but does not match `pattern \"Name\"`. |\n| `DUPLICATE_PATTERN` | More than one valid pattern declaration was found. |\n| `MISSING_CAST_ON` | No `cast_on` statement was found. If a `cast_on` statement exists but is malformed, use `MALFORMED_CAST_ON` instead. |\n| `MALFORMED_CAST_ON` | A line begins with `cast_on` but does not contain a positive integer. |\n| `DUPLICATE_CAST_ON` | More than one valid `cast_on` declaration was found. |\n| `CAST_ON_OUT_OF_ORDER` | `cast_on` appears after a row declaration. |\n| `UNKNOWN_STATEMENT` | A non-empty, non-comment line does not begin with a recognized statement keyword. |\n| `MALFORMED_ROW` | A line begins with `row` but does not match row syntax, has an invalid row number, has no instructions, or has malformed bracket syntax. |\n| `DUPLICATE_ROW` | The same valid row number is declared more than once. A duplicate row must not also report `OUT_OF_ORDER_ROW` solely because it repeats an earlier row number. |\n| `OUT_OF_ORDER_ROW` | A non-duplicate valid row number is lower than a previously claimed valid row number. |\n| `UNKNOWN_STITCH` | A stitch token is not one of the supported operations. |\n| `STITCH_UNDERFLOW` | An operation requires more stitches than remain available at that point in the row. |\n| `STITCH_OVERFLOW` | A validly parsed row produces more than 10,000 stitches at the end of the row. |\n| `MALFORMED_REPEAT` | A line begins with `repeat` but does not have the required repeat statement structure. |\n| `INVALID_REPEAT_COUNT` | A repeat count token is present after `x` but is not a positive integer. |\n| `INVALID_REPEAT_RANGE` | A repeat range is invalid or references rows that do not exist as original source rows. |\n| `MALFORMED_BIND_OFF` | A line begins with `bind_off` but is not exactly `bind_off`. |\n| `DUPLICATE_BIND_OFF` | More than one syntactically valid `bind_off` statement was found. |\n| `BIND_OFF_OUT_OF_ORDER` | A valid `bind_off` statement appears before a later non-empty, non-comment statement, except for a second syntactically valid `bind_off`, which uses `DUPLICATE_BIND_OFF` only. |\n\nNo warnings are defined in this spec.\n\nThe only valid `type` value is `\"error\"`.\n\n## 19. Required JSON Output Schema\n\nThe program must print exactly one JSON object with these top-level fields:\n\n```json\n{\n  \"pattern_name\": \"Tiny Doom Scarf\",\n  \"cast_on\": 10,\n  \"valid\": true,\n  \"errors\": [],\n  \"expanded_rows\": [],\n  \"final_stitch_count\": 10,\n  \"bind_off\": true\n}\n```\n\nTop-level field rules:\n\n| Field | Type | Rule |\n|---|---|---|\n| `pattern_name` | string or null | The parsed pattern name, or `null` if no valid pattern declaration exists or if `DUPLICATE_PATTERN` is reported. |\n| `cast_on` | integer or null | The first syntactically valid cast-on value, or `null` if no syntactically valid cast-on declaration exists or if `DUPLICATE_CAST_ON` is reported. A cast-on value that is syntactically valid but out of order is still output here, but it is not usable for simulation. |\n| `valid` | boolean | `true` only if no errors were detected. |\n| `errors` | array | Empty when valid; otherwise contains error objects. |\n| `expanded_rows` | array | Contains expanded row objects only when `valid` is `true`. Must be empty when `valid` is `false`. |\n| `final_stitch_count` | integer or null | Final stitch count when valid; `null` when invalid. |\n| `bind_off` | boolean | `true` if a syntactically valid `bind_off` statement was present, otherwise `false`. |\n\nIf `valid` is `false`, `expanded_rows` must be `[]` and `final_stitch_count` must be `null`, even if some rows were parsed successfully.\n\nIf a valid pattern contains no rows, `expanded_rows` must be `[]` and `final_stitch_count` must equal `cast_on`.\n\n## 20. Expanded Row Object Schema\n\nEach expanded row object must have this structure:\n\n```json\n{\n  \"expanded_row_index\": 1,\n  \"source_row\": 1,\n  \"instructions\": [\n    {\n      \"stitch\": \"k\",\n      \"count\": 10\n    }\n  ],\n  \"start_stitches\": 10,\n  \"end_stitches\": 10\n}\n```\n\nField rules:\n\n| Field | Type | Rule |\n|---|---|---|\n| `expanded_row_index` | integer | Sequential index in the expanded output, starting at 1. |\n| `source_row` | integer | Original source row number this expanded row came from. |\n| `instructions` | array | Fully expanded flat instruction list after bracketed repeat expansion. Bracketed repeat structure must never be preserved in output JSON. |\n| `start_stitches` | integer | Stitch count entering this row. |\n| `end_stitches` | integer | Stitch count after this row is processed. |\n\nExample:\n\n```text\nrow 1: k10\nrow 2: p10\nrepeat rows 1-2 x2\n```\n\nExpanded rows:\n\n| expanded_row_index | source_row |\n|---:|---:|\n| 1 | 1 |\n| 2 | 2 |\n| 3 | 1 |\n| 4 | 2 |\n| 5 | 1 |\n| 6 | 2 |\n\n## 21. Instruction Object Schema\n\nEach instruction object must have this structure:\n\n```json\n{\n  \"stitch\": \"k\",\n  \"count\": 10\n}\n```\n\nRules:\n\n- Every instruction object must include `stitch` and `count`.\n- For counted stitches `kN` and `pN`, `count` is `N`.\n- For `yo`, `k2tog`, `ssk`, `inc`, and `dec`, `count` must be `1`.\n\nExamples:\n\n```text\nk10      -> {\"stitch\": \"k\", \"count\": 10}\nyo       -> {\"stitch\": \"yo\", \"count\": 1}\nk2tog    -> {\"stitch\": \"k2tog\", \"count\": 1}\n```\n\n## 22. Valid Output Example\n\nInput:\n\n```text\npattern \"Tiny Doom Scarf\"\ncast_on 10\nrow 1: k10\nrow 2: k2, yo, k6, k2tog\nbind_off\n```\n\nOutput:\n\n```json\n{\n  \"pattern_name\": \"Tiny Doom Scarf\",\n  \"cast_on\": 10,\n  \"valid\": true,\n  \"errors\": [],\n  \"expanded_rows\": [\n    {\n      \"expanded_row_index\": 1,\n      \"source_row\": 1,\n      \"instructions\": [\n        {\n          \"stitch\": \"k\",\n          \"count\": 10\n        }\n      ],\n      \"start_stitches\": 10,\n      \"end_stitches\": 10\n    },\n    {\n      \"expanded_row_index\": 2,\n      \"source_row\": 2,\n      \"instructions\": [\n        {\n          \"stitch\": \"k\",\n          \"count\": 2\n        },\n        {\n          \"stitch\": \"yo\",\n          \"count\": 1\n        },\n        {\n          \"stitch\": \"k\",\n          \"count\": 6\n        },\n        {\n          \"stitch\": \"k2tog\",\n          \"count\": 1\n        }\n      ],\n      \"start_stitches\": 10,\n      \"end_stitches\": 10\n    }\n  ],\n  \"final_stitch_count\": 10,\n  \"bind_off\": true\n}\n```\n\n## 23. Invalid Output Example: Missing Pattern\n\nInput:\n\n```text\ncast_on 10\nrow 1: k10\n```\n\nOutput:\n\n```json\n{\n  \"pattern_name\": null,\n  \"cast_on\": 10,\n  \"valid\": false,\n  \"errors\": [\n    {\n      \"type\": \"error\",\n      \"code\": \"MISSING_PATTERN\",\n      \"message\": \"Missing pattern declaration.\",\n      \"line\": null,\n      \"row\": null\n    }\n  ],\n  \"expanded_rows\": [],\n  \"final_stitch_count\": null,\n  \"bind_off\": false\n}\n```\n\n## 24. Invalid Output Example: Multiple Errors\n\nInput:\n\n```text\npattern Tiny Doom Scarf\ncast_on 5\nrow 1: k3, k4\nrow 1: dance10\nrepeat rows 2-4 x0\nbind_off\nrow 3: k5\n```\n\nOne acceptable output shape:\n\n```json\n{\n  \"pattern_name\": null,\n  \"cast_on\": 5,\n  \"valid\": false,\n  \"errors\": [\n    {\n      \"type\": \"error\",\n      \"code\": \"MALFORMED_PATTERN\",\n      \"message\": \"Malformed pattern declaration.\",\n      \"line\": 1,\n      \"row\": null\n    },\n    {\n      \"type\": \"error\",\n      \"code\": \"STITCH_UNDERFLOW\",\n      \"message\": \"Row 1 consumes more stitches than available.\",\n      \"line\": 3,\n      \"row\": 1\n    },\n    {\n      \"type\": \"error\",\n      \"code\": \"DUPLICATE_ROW\",\n      \"message\": \"Duplicate row number 1.\",\n      \"line\": 4,\n      \"row\": 1\n    },\n    {\n      \"type\": \"error\",\n      \"code\": \"UNKNOWN_STITCH\",\n      \"message\": \"Unknown stitch dance10.\",\n      \"line\": 4,\n      \"row\": 1\n    },\n    {\n      \"type\": \"error\",\n      \"code\": \"INVALID_REPEAT_COUNT\",\n      \"message\": \"Repeat count must be a positive integer.\",\n      \"line\": 5,\n      \"row\": null\n    },\n    {\n      \"type\": \"error\",\n      \"code\": \"INVALID_REPEAT_RANGE\",\n      \"message\": \"Repeat range references rows that do not exist.\",\n      \"line\": 5,\n      \"row\": null\n    },\n    {\n      \"type\": \"error\",\n      \"code\": \"BIND_OFF_OUT_OF_ORDER\",\n      \"message\": \"Statement appears after bind_off.\",\n      \"line\": 7,\n      \"row\": 3\n    }\n  ],\n  \"expanded_rows\": [],\n  \"final_stitch_count\": null,\n  \"bind_off\": true\n}\n```\n\nThe exact `message` strings are implementation-defined. The messages shown in this example are illustrative only. For error comparison, `type`, `code`, `line`, and `row` are normative; `message` is only required to be a non-empty human-readable string.\n\n## 25. Exit Codes\n\nThe process must exit with:\n\n| Exit code | Meaning |\n|---:|---|\n| 0 | The input was compiled successfully and `valid` is `true`. |\n| 1 | The input was processed but `valid` is `false`. |\n| 2 | CLI usage error, for example missing file argument or unreadable file. |\n\nEven when exiting with code 1, stdout must contain exactly one valid JSON object following this spec.\n\nFor exit code 2, stdout must be empty. Stderr may contain a short human-readable diagnostic, but stderr is not part of the judged output.\n\n## 26. Constraints\n\nInput and runtime constraints:\n\n- Input files will be under 100 KB.\n- Total original source row count will be at most 1000.\n- Total stitch count per expanded row must not exceed 10,000.\n- If the produced stitch count for the current working row exceeds 10,000 at any point while processing a validly parsed row, report `STITCH_OVERFLOW`, stop simulating immediately, and do not simulate subsequent rows.\n- If simulation reaches `STITCH_UNDERFLOW`, stop simulating immediately and do not simulate subsequent rows.\n- Runtime must be under 5 seconds per invocation.\n\nAnything slower is treated as failure. It is a scarf compiler, not a moon landing.\n\n## 27. Out of Scope\n\nThe following are not part of this DSL:\n\n- color\n- yarn weight\n- needle size\n- cabling\n- bobbles\n- lace charts\n- graphical knitting charts\n- real-world knitting correctness beyond this spec\n- any feature not explicitly listed in this document\n\nAny behavior, syntax, feature, output field, or recovery policy not explicitly defined in this spec is out of scope and will not be tested or judged. Participants may implement unspecified behavior however they like, as long as it does not change the required behavior defined here.\n",
+  "workspaceDir": "/Users/jeffersonchukwuka/Developer/42Berlin/42_Needle_Hackathon/apps/agent/solution",
+  "phase": "FIXING",
+  "plan": {
+    "steps": [
+      "Parse the input file to extract statements.",
+      "Validate the parsed statements for syntax and semantic correctness.",
+      "Expand bracketed repeats in the instruction lists.",
+      "Simulate stitch counts row by row, tracking start and end stitches.",
+      "Handle errors and report them as specified.",
+      "Construct the output JSON object based on the simulation results."
+    ],
+    "entrypoint": "knit.py",
+    "run_command": "python knit.py",
+    "required_inputs": "A file with a .knit extension containing knitting pattern instructions.",
+    "required_outputs": "A single JSON document printed to stdout, conforming to the specified schema.",
+    "edge_cases": [
+      "Handling of comments and case sensitivity in keywords/stitches.",
+      "Error recovery for malformed statements and out-of-order rows.",
+      "Correct handling of duplicate and out-of-order rows.",
+      "Proper simulation of stitch counts with error detection.",
+      "Validating row repeat ranges and handling invalid repeats."
+    ]
+  },
+  "iteration": 78,
+  "maxIterations": 400,
+  "bestScore": 0,
+  "noImprovementStreak": 37,
+  "planFailures": 0,
+  "lastTestResult": {
+    "score": 0,
+    "total": 150,
+    "failing_categories": [
+      "level_01_valid_basics",
+      "level_02_stitches",
+      "level_03_brackets",
+      "level_04_row_repeats",
+      "level_05_single_errors",
+      "level_06_multi_error_recovery",
+      "level_07_cli_output",
+      "level_08_stress"
+    ],
+    "raw": "\nKnitting Compiler Scoreboard\nOverall [................................] 0/150 passed (0.0%)\nFailed: 150\n\npublic\n  [........................] 0/150\n  level_01_valid_basics                [..................]   0/20 \n  level_02_stitches                    [..................]   0/25 \n  level_03_brackets                    [..................]   0/25 \n  level_04_row_repeats                 [..................]   0/20 \n  level_05_single_errors               [..................]   0/30 \n  level_06_multi_error_recovery        [..................]   0/15 \n  level_07_cli_output                  [..................]   0/5  \n  level_08_stress                      [..................]   0/10 \n\nFailures\n- pub_level_01_valid_basics_001: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_001.knit\\n'\n- pub_level_01_valid_basics_002: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_002.knit\\n'\n- pub_level_01_valid_basics_003: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_003.knit\\n'\n- pub_level_01_valid_basics_004: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_004.knit\\n'\n- pub_level_01_valid_basics_005: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_005.knit\\n'\n- pub_level_01_valid_basics_006: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_006.knit\\n'\n- pub_level_01_valid_basics_007: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_007.knit\\n'\n- pub_level_01_valid_basics_008: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_008.knit\\n'\n- pub_level_01_valid_basics_009: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_009.knit\\n'\n- pub_level_01_valid_basics_010: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_010.knit\\n'\n- pub_level_01_valid_basics_011: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_011.knit\\n'\n- pub_level_01_valid_basics_012: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_012.knit\\n'\n- pub_level_01_valid_basics_013: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_013.knit\\n'\n- pub_level_01_valid_basics_014: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_014.knit\\n'\n- pub_level_01_valid_basics_015: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_015.knit\\n'\n- pub_level_01_valid_basics_016: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_016.knit\\n'\n- pub_level_01_valid_basics_017: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_017.knit\\n'\n- pub_level_01_valid_basics_018: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_018.knit\\n'\n- pub_level_01_valid_basics_019: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_019.knit\\n'\n- pub_level_01_valid_basics_020: exit code expected 0, got 2\n  stderr tail: 'usage: knit.py [-h] [--file-path FILE_PATH]\\nknit.py: error: unrecognized arguments: compile /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/public_tests/level_01_valid_basics/pub_level_01_valid_basics_020.knit\\n'\n... 130 more failures not shown\n\n\n\n--- PROGRAM SMOKE RUN (python knit.py, no stdin) ---\nexit code: 0\nstdout:\n{'error': 'No input file provided. Please provide a valid .knit file.'}\n\nstderr: (empty)"
+  },
+  "lastGoodSnapshot": {
+    "knit.py": "# knit.py\n\ndef parse_input(file_path):\n    pass\n\ndef validate_statements(statements):\n    pass\n\ndef expand_bracketed_repeats(instruction_lists):\n    pass\n\ndef simulate_stitch_counts(row_data):\n    pass\n\ndef handle_errors(errors):\n    pass\n\ndef construct_output(simulation_results):\n    pass\n\nif __name__ == '__main__':\n    import sys\n    if len(sys.argv) > 1:\n    if len(sys.argv) > 1:\n    if len(sys.argv) > 1:\n    input_file = sys.argv[1]\nelse:\n    print('No input file provided')\n    exit(1)\nelse:\n    print('No input file provided')\n    exit(1)\nelse:\n    print('No input file provided')\n    exit(1)\n    parsed_statements = parse_input(input_file)\n    validated_statements = validate_statements(parsed_statements)\n    expanded_lists = expand_bracketed_repeats(validated_statements)\n    simulation_results = simulate_stitch_counts(expanded_lists)\n    errors = handle_errors(simulation_results)\n    output = construct_output(simulation_results)\n    print(output)"
+  },
+  "scoreProgression": [
+    {
+      "ts": "2026-05-22T08:37:08.410Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:37:21.810Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:37:50.472Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:38:23.594Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:39:03.150Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:39:20.088Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:39:44.133Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:40:04.117Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:40:24.580Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:40:33.257Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:40:56.774Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:41:14.723Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:41:26.457Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:41:46.278Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:42:07.783Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:42:40.682Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:45:00.188Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:46:41.233Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:47:45.338Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:48:25.768Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:49:13.535Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:50:07.680Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:51:01.934Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:51:52.083Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:54:03.423Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:54:47.636Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:55:28.802Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:56:41.297Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:57:01.062Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:58:42.852Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T08:59:36.210Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T09:00:24.876Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T09:00:51.251Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T09:01:41.475Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T09:01:54.459Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T09:02:13.866Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T09:03:15.179Z",
+      "score": 0,
+      "total": 150
+    },
+    {
+      "ts": "2026-05-22T09:04:32.059Z",
+      "score": 0,
+      "total": 150
+    }
+  ],
+  "selfTests": [
+    {
+      "name": "Valid Pattern with Single Row",
+      "rule": "The compiler must correctly parse and simulate a pattern with a single row.",
+      "inputName": "single_row.knit",
+      "inputContent": "pattern \"Single Row Scarf\"\ncast_on 10\nrow 1: k10\nbind_off",
+      "args": "compile single_row.knit",
+      "expectedStdout": "{\"pattern_name\": \"Single Row Scarf\", \"cast_on\": 10, \"valid\": true, \"errors\": [], \"expanded_rows\": [{\"expanded_row_index\": 1, \"source_row\": 1, \"instructions\": [{\"stitch\": \"k\", \"count\": 10}], \"start_stitches\": 10, \"end_stitches\": 10}], \"final_stitch_count\": 10, \"bind_off\": true}"
+    },
+    {
+      "name": "Valid Pattern with Multiple Rows",
+      "rule": "The compiler must correctly parse and simulate a pattern with multiple rows.",
+      "inputName": "example.knit",
+      "inputContent": "pattern \"Tiny Doom Scarf\"\ncast_on 10\nrow 1: k10\nrow 2: p10\nrow 3: k2, yo, k6, k2tog\nrepeat rows 1-3 x2\nbind_off",
+      "args": "compile example.knit",
+      "expectedStdout": "{\"pattern_name\": \"Tiny Doom Scarf\", \"cast_on\": 10, \"valid\": true, \"errors\": [], \"expanded_rows\": [{\"expanded_row_index\": 1, \"source_row\": 1, \"instructions\": [{\"stitch\": \"k\", \"count\": 10}], \"start_stitches\": 10, \"end_stitches\": 10}, {\"expanded_row_index\": 2, \"source_row\": 2, \"instructions\": [{\"stitch\": \"p\", \"count\": 10}], \"start_stitches\": 10, \"end_stitches\": 10}, {\"expanded_row_index\": 3, \"source_row\": 3, \"instructions\": [{\"stitch\": \"k\", \"count\": 2}, {\"stitch\": \"yo\", \"count\": 1}, {\"stitch\": \"k\", \"count\": 6}, {\"stitch\": \"k2tog\", \"count\": 1}], \"start_stitches\": 10, \"end_stitches\": 10}, {\"expanded_row_index\": 4, \"source_row\": 1, \"instructions\": [{\"stitch\": \"k\", \"count\": 10}], \"start_stitches\": 10, \"end_stitches\": 10}, {\"expanded_row_index\": 5, \"source_row\": 2, \"instructions\": [{\"stitch\": \"p\", \"count\": 10}], \"start_stitches\": 10, \"end_stitches\": 10}, {\"expanded_row_index\": 6, \"source_row\": 3, \"instructions\": [{\"stitch\": \"k\", \"count\": 2}, {\"stitch\": \"yo\", \"count\": 1}, {\"stitch\": \"k\", \"count\": 6}, {\"stitch\": \"k2tog\", \"count\": 1}], \"start_stitches\": 10, \"end_stitches\": 10}], \"final_stitch_count\": 10, \"bind_off\": true}"
+    },
+    {
+      "name": "Invalid Pattern Declaration",
+      "rule": "A file containing a recognized but malformed `pattern` statement and no valid pattern declaration should report `MALFORMED_PATTERN`, suppress `MISSING_PATTERN`, and output `pattern_name: null`.",
+      "inputName": "invalid_pattern.knit",
+      "inputContent": "pattern Tiny Doom Scarf",
+      "args": "compile invalid_pattern.knit",
+      "expectedStdout": "{\"pattern_name\":null,\"cast_on\":null,\"valid\":false,\"errors\":[{\"type\":\"error\",\"code\":\"MALFORMED_PATTERN\",\"message\":\"Malformed pattern declaration.\",\"line\":1,\"row\":null}],\"expanded_rows\":[],\"final_stitch_count\":null,\"bind_off\":false}"
+    },
+    {
+      "name": "Invalid Pattern Declaration with Multiple Valid Declarations",
+      "rule": "If multiple valid pattern declarations exist, the compiler must report DUPLICATE_PATTERN for each additional valid pattern declaration after the first.",
+      "inputName": "test.knit",
+      "inputContent": "pattern \"Pattern One\"\npattern \"Pattern Two\"",
+      "args": "compile test.knit",
+      "expectedStdout": "{\"pattern_name\": null, \"cast_on\": null, \"valid\": false, \"errors\": [{\"type\": \"error\", \"code\": \"DUPLICATE_PATTERN\", \"message\": \"Duplicate pattern declaration.\", \"line\": 2, \"row\": null}], \"expanded_rows\": [], \"final_stitch_count\": null, \"bind_off\": false}",
+      "expectedExitCode": 1
+    }
+  ],
+  "testCommand": "python3 /Users/jeffersonchukwuka/Developer/42Berlin/42xNeedle_Hackathon/secret_spec/test_runner/run_tests.py --compiler \"python3 knit.py\"",
+  "testSource": "official",
+  "verificationCommands": [
+    "python knit.py"
+  ],
+  "nextVerificationIndex": 0,
+  "lastRunState": {
+    "command": "python knit.py",
+    "fingerprint": "exit code: 0\nstdout:\n{'error': 'No input file provided. Please provide a valid .knit file.'}",
+    "repeats": 2
+  },
+  "dryRun": false
+}
