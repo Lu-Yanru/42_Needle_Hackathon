@@ -12,7 +12,7 @@ import { MAX_ITERATIONS, MODEL, TEST_COMMAND } from "./config";
 import { EventLog } from "./events";
 import { Logger } from "./logger";
 import { runAgent } from "./loop";
-import { checkOllama } from "./ollama";
+import { checkModel } from "./openrouter";
 import type { RunState } from "./state";
 import { buildFinalReport, writeManifest } from "./submission";
 
@@ -83,18 +83,18 @@ async function main(): Promise<number> {
   const logger = await Logger.create(outputDir);
   const events = await EventLog.create(outputDir);
 
-  const ollama = await checkOllama();
-  if (ollama.isErr()) {
-    console.error(`Ollama not ready: ${ollama.error.message}`);
+  const model = await checkModel();
+  if (model.isErr()) {
+    console.error(`OpenRouter not ready: ${model.error.message}`);
     await logger.error(
-      "OLLAMA_UNAVAILABLE",
-      ollama.error.message,
+      "MODEL_UNAVAILABLE",
+      model.error.message,
       "cannot start the run",
-      "fix Ollama / pull the model",
+      "set OPENROUTER_API_KEY / check connectivity",
     );
     return 1;
   }
-  console.log(ollama.value.detail);
+  console.log(model.value.detail);
 
   const state: RunState = {
     specPath: args.spec,

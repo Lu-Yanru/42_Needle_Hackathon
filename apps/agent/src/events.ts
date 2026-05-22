@@ -8,7 +8,7 @@
 import { join, resolve } from "node:path";
 import { Result } from "better-result";
 import { FileSystemError } from "./errors";
-import type { Usage } from "./ollama";
+import type { Usage } from "./openrouter";
 import type { Phase, RunState, ScorePoint } from "./state";
 
 export interface RunEvent extends Record<string, unknown> {

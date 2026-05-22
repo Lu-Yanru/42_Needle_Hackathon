@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@openrouter/ai-sdk-provider": "catalog:",
     "@t3-oss/env-core": "^0.13.1",
+    "ai": "catalog:",
     "better-result": "catalog:",
     "zod": "catalog:"
   },

@@ -14,6 +14,9 @@ import { existsSync, readdirSync, rmSync, statSync, type Stats } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { generateText } from "ai";
+
 import type {
   AgentSnapshot,
   ChecklistItem,
@@ -384,12 +387,12 @@ async function hydrateFiles(files: WorkspaceFile[], workspaceDir: string): Promi
 
 function defaultManifest(model: string): Manifest {
   return {
-    primary_model: model || "qwen2.5-coder:7b",
-    provider: "Ollama",
+    primary_model: model || "openai/gpt-oss-120b",
+    provider: "OpenRouter",
     additional_models: [],
-    paid_usage: { paid_inference: false, paid_apis: false, paid_tools: false },
+    paid_usage: { paid_inference: true, paid_apis: false, paid_tools: false },
     hardware: hardwareLabel(),
-    offline: true,
+    offline: false,
   };
 }
 
@@ -406,6 +409,7 @@ interface ManifestFile {
   paid_frontier_models_used_after_spec_release?: boolean;
   institutional_or_work_model_quota_used_after_spec_release?: boolean;
   copilot_or_paid_ide_assistant_used_after_spec_release?: boolean;
+  paid_inference_api_used?: boolean;
 }
 
 /** Read the real agent_manifest.json, mapping its disclosure fields. */
@@ -417,16 +421,16 @@ async function buildManifest(model: string): Promise<Manifest> {
     try {
       const m = JSON.parse(raw) as ManifestFile;
       return {
-        primary_model: m.primary_model || model || "qwen2.5-coder:7b",
-        provider: m.provider || "Ollama",
+        primary_model: m.primary_model || model || "openai/gpt-oss-120b",
+        provider: m.provider || "OpenRouter",
         additional_models: m.additional_models ?? [],
         paid_usage: {
-          paid_inference: m.paid_frontier_models_used_after_spec_release ?? false,
+          paid_inference: m.paid_inference_api_used ?? false,
           paid_apis: m.institutional_or_work_model_quota_used_after_spec_release ?? false,
           paid_tools: m.copilot_or_paid_ide_assistant_used_after_spec_release ?? false,
         },
         hardware: hardwareLabel(),
-        offline: (m.provider ?? "Ollama").toLowerCase() === "ollama",
+        offline: (m.provider ?? "OpenRouter").toLowerCase() === "ollama",
       };
     } catch {
       // fall through to the next candidate / default
@@ -683,49 +687,39 @@ export async function logIntervention(entry: InterventionInput): Promise<AgentSn
   return getSnapshot();
 }
 
-const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-const AGENT_MODEL = process.env.AGENT_MODEL ?? "qwen2.5-coder:7b";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
+const AGENT_MODEL = process.env.AGENT_MODEL ?? "openai/gpt-oss-120b";
 
-interface OllamaChatResponse {
-  message?: { content?: string };
-}
+const openrouter = createOpenRouter({ apiKey: OPENROUTER_API_KEY });
 
-/** Best-effort live preview: ask the local model how it would act on a nudge.
- *  Only attempted when no run is active — during a run the model is saturated. */
+/** Best-effort live preview: ask the model how it would act on a nudge.
+ *  Only attempted when no run is active — during a run the model is busy. */
 async function askAgent(prompt: string, context: string, model: string): Promise<PromptResult> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45_000);
+  if (!OPENROUTER_API_KEY) {
+    return {
+      reply:
+        "Queued for the agent. No live preview was generated — OPENROUTER_API_KEY is not configured for the console — but the prompt will be applied at the next iteration.",
+      model: "",
+    };
+  }
   try {
-    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        stream: false,
-        keep_alive: "30m",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an autonomous coding agent being observed in an operator console. " +
-              "An operator just sent you a nudge. Reply in first person, 2-4 sentences, " +
-              "describing concretely how you will act on it at the next iteration boundary. " +
-              `Current run context: ${context}`,
-          },
-          { role: "user", content: prompt },
-        ],
-        options: { temperature: 0.2 },
-      }),
+    const { text } = await generateText({
+      model: openrouter(model),
+      abortSignal: AbortSignal.timeout(45_000),
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an autonomous coding agent being observed in an operator console. " +
+            "An operator just sent you a nudge. Reply in first person, 2-4 sentences, " +
+            "describing concretely how you will act on it at the next iteration boundary. " +
+            `Current run context: ${context}`,
+        },
+        { role: "user", content: prompt },
+      ],
     });
-    if (!res.ok) {
-      return {
-        reply: `Queued for the agent. The local model returned HTTP ${res.status}, so no live preview was generated — the prompt will still be applied at the next iteration.`,
-        model: "",
-      };
-    }
-    const data = (await res.json()) as OllamaChatResponse;
-    const reply = data.message?.content?.trim();
+    const reply = text.trim();
     return reply
       ? { reply, model }
       : {
@@ -733,15 +727,14 @@ async function askAgent(prompt: string, context: string, model: string): Promise
           model: "",
         };
   } catch (err) {
-    const aborted = err instanceof Error && err.name === "AbortError";
+    const aborted =
+      err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
     return {
       reply: aborted
-        ? "Queued for the agent. The live preview timed out — the local model did not respond in time — but the prompt is in the queue and will be applied at the next iteration."
-        : `Queued for the agent. The local model at ${OLLAMA_URL} could not be reached for a live preview; the prompt is still queued and will be applied at the next iteration.`,
+        ? "Queued for the agent. The live preview timed out — the model did not respond in time — but the prompt is in the queue and will be applied at the next iteration."
+        : "Queued for the agent. OpenRouter could not be reached for a live preview; the prompt is still queued and will be applied at the next iteration.",
       model: "",
     };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
