@@ -707,17 +707,12 @@ async function askAgent(prompt: string, context: string, model: string): Promise
       model: openrouter(model),
       abortSignal: AbortSignal.timeout(45_000),
       temperature: 0.2,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are an autonomous coding agent being observed in an operator console. " +
-            "An operator just sent you a nudge. Reply in first person, 2-4 sentences, " +
-            "describing concretely how you will act on it at the next iteration boundary. " +
-            `Current run context: ${context}`,
-        },
-        { role: "user", content: prompt },
-      ],
+      system:
+        "You are an autonomous coding agent being observed in an operator console. " +
+        "An operator just sent you a nudge. Reply in first person, 2-4 sentences, " +
+        "describing concretely how you will act on it at the next iteration boundary. " +
+        `Current run context: ${context}`,
+      messages: [{ role: "user", content: prompt }],
     });
     const reply = text.trim();
     return reply

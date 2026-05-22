@@ -67,13 +67,21 @@ export async function generateStructured<S extends z.ZodType>(
   options: StructuredOptions<S>,
 ): Promise<Result<StructuredResult<z.infer<S>>, ModelError>> {
   const started = Date.now();
+  // The AI SDK prefers its dedicated `system` option over system-role
+  // messages; our system prompt is trusted (we build it), so lift it out.
+  const system = options.messages
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n\n");
+  const conversation = options.messages.filter((m) => m.role !== "system");
   const generated = await Result.tryPromise({
     try: () =>
       generateObject({
         model: openrouter(options.model ?? MODEL),
         schema: options.schema,
         schemaName: options.schemaName,
-        messages: options.messages as ModelMessage[],
+        system: system || undefined,
+        messages: conversation as ModelMessage[],
         temperature: TEMPERATURE,
         maxRetries: REQUEST_RETRIES,
         abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
